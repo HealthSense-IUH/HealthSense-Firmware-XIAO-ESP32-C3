@@ -1,3 +1,4 @@
+import os
 import serial
 import serial.tools.list_ports
 import csv
@@ -41,8 +42,10 @@ except Exception as e:
     print(f"❌ Lỗi kết nối: {e}")
     exit(1)
 
-# 2. Tạo file CSV mới
-filename = f"data_do_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+# 2. Tạo file CSV mới và thư mục data nếu chưa có
+if not os.path.exists('data'):
+    os.makedirs('data')
+filename = f"data/data_do_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
 with open(filename, mode='w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
