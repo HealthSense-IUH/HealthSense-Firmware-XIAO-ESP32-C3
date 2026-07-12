@@ -10,17 +10,32 @@ if not ports:
     print("❌ Không tìm thấy cổng COM nào. Hãy cắm mạch vào máy tính!")
     exit(1)
 
-# Lấy cổng COM đầu tiên tìm thấy (nếu bạn cắm nhiều thiết bị, có thể cần đổi tay)
-PORT = ports[0].device
+print("🔍 Các cổng COM đang cắm vào máy:")
+for i, p in enumerate(ports):
+    print(f"  [{i}] {p.device} - {p.description}")
+
+if len(ports) > 1:
+    idx = input(f"👉 Chọn số thứ tự cổng COM của ESP32 (0 đến {len(ports)-1}) [Mặc định 0]: ")
+    idx = int(idx) if idx.strip().isdigit() else 0
+    PORT = ports[idx].device
+else:
+    PORT = ports[0].device
 BAUDRATE = 115200
 
 print(f"🔌 Đang kết nối với mạch qua cổng {PORT}...")
 
 try:
-    ser = serial.Serial(PORT, BAUDRATE, timeout=1)
+    # Cấu hình cổng COM nhưng chưa mở
+    ser = serial.Serial()
+    ser.port = PORT
+    ser.baudrate = BAUDRATE
+    ser.timeout = 1
+    # Bật DTR/RTS (rất quan trọng cho mạch ESP32-C3 Native USB)
     ser.dtr = True
     ser.rts = True
-    time.sleep(2) # Đợi mạch khởi động
+    ser.open()
+    
+    time.sleep(1) # Đợi mạch khởi động
     print("✅ Kết nối thành công! Đang lắng nghe dữ liệu...")
 except Exception as e:
     print(f"❌ Lỗi kết nối: {e}")
@@ -40,12 +55,16 @@ with open(filename, mode='w', newline='', encoding='utf-8') as file:
     try:
         while True:
             # Đọc 1 dòng từ Serial (timeout=1s)
-            line = ser.readline().decode('utf-8', errors='ignore').strip()
+            raw_line = ser.readline()
             
-            if not line:
+            if not raw_line:
                 continue
                 
-            # Bỏ qua các dòng log debug của hệ thống, chỉ lấy dòng dữ liệu
+            line = raw_line.decode('utf-8', errors='ignore').strip()
+            
+            # IN RA TẤT CẢ MỌI THỨ NHẬN ĐƯỢC ĐỂ DEBUG
+            print(f"Nhận được: {line}")
+            
             # Định dạng mới: Time, IR, RED, BPM, SpO2, Motion -> có 5 dấu phẩy
             if line.count(',') == 5 and not line.startswith('['):
                 # Tách các giá trị bằng dấu phẩy
@@ -54,11 +73,7 @@ with open(filename, mode='w', newline='', encoding='utf-8') as file:
                 # Ghi vào file CSV
                 writer.writerow(data)
                 file.flush() # Đảm bảo ghi ngay lập tức không bị crash mất dữ liệu
-                
-                print(f"Lưu: {data}")
-            else:
-                # In ra các log khác (debug) để bạn tiện theo dõi
-                print(f"Log: {line}")
+                print(" -> Đã lưu vào CSV!")
                     
     except KeyboardInterrupt:
         print("\n🛑 Đã dừng ghi. File đã được lưu an toàn!")
