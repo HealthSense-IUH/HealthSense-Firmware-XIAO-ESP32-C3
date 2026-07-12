@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../../.BLE TEST PROJ/ble-test-proj"
+		},
+		{
+			"name": "ble_test",
+			"path": "."
+		}
+	],
+	"settings": {}
+}
