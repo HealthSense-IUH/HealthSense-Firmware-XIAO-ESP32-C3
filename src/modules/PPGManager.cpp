@@ -2,6 +2,7 @@
 #include <MAX30105.h>
 #include <heartRate.h>
 #include <Arduino.h>
+#include "AccelManager.h"
 
 static MAX30105 particleSensor;
 static const byte* interruptPinPtr = nullptr;
@@ -150,6 +151,10 @@ void PPGManager_process() {
           }
         }
       }
+      
+      // LOG DATA RA SERIAL CHO PYTHON ĐỌC (CSV FORMAT)
+      Serial.printf("%lu,%lu,%lu,%u,%u,%d\n", millis(), (uint32_t)irValue, (uint32_t)redValue, finalBPM, finalSpO2, AccelManager_isMoving() ? 1 : 0);
+      
     }
     particleSensor.nextSample();
   }
