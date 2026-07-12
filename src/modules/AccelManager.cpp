@@ -92,7 +92,9 @@ void AccelManager_printDebug() {
   if (millis() - lastDebugPrint >= 1000) {
     lastDebugPrint = millis();
 
-    Serial.print("[ACCEL-DBG] isMoving=");
+    Serial.print("[");
+    Serial.print(millis());
+    Serial.print("] [ACCEL-DBG] isMoving=");
     Serial.print(isMoving ? "1" : "0");
     Serial.print(" | isrCount=");
     Serial.print((uint32_t)motionIsrCount);

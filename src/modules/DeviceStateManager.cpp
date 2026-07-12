@@ -79,7 +79,9 @@ void DeviceStateManager_onEvent(DeviceEvent event) {
 
         case EVT_MOTION:
             if (currentMode == MODE_MEASURE || currentMode == MODE_SCREENING) {
-                Serial.println("event MOTION, detected arm motion");
+                Serial.print("[");
+                Serial.print(millis());
+                Serial.println("] event MOTION, detected arm motion");
                 sendBLECommand("CMD:MOTION\n");
                 if (currentMode == MODE_SCREENING) {
                     // Đang tầm soát mà nhúc nhích? Tắt đèn LED ngay lập tức 
