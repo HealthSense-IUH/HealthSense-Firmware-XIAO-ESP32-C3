@@ -44,7 +44,7 @@ void DeviceStateManager_handleButton() {
             isBtnPressed = true;
             btnPressTime = millis();
             isLongPressHandled = false;
-        } else if (!isLongPressHandled && (millis() - btnPressTime >= 5000)) {
+        } else if (!isLongPressHandled && (millis() - btnPressTime >= 4000)) {
             isLongPressHandled = true;
             DeviceStateManager_onEvent(EVT_BUTTON_LONG);
         }
@@ -207,6 +207,8 @@ static void enterMode(DeviceMode mode) {
         case MODE_SHUTDOWN:
             Serial.println("Mode SHUTDOWN");
             PPGManager_shutDown();
+            DisplayPower_showRed();   // Báo hiệu đang tắt (đỏ 1 giây)
+            delay(1000);
             DisplayPower_showOff();
             pinMode(D4, INPUT);
             pinMode(D5, INPUT);

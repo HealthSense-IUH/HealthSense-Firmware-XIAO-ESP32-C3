@@ -21,6 +21,12 @@ void DisplayPower_showOn() {
   pixelsPtr->show();
 }
 
+void DisplayPower_showRed() {
+  if (!pixelsPtr) return;
+  pixelsPtr->setPixelColor(0, pixelsPtr->Color(225,0,0));
+  pixelsPtr->show();
+}
+
 void DisplayPower_showOff() {
   if (!pixelsPtr) return;
   pixelsPtr->clear();
