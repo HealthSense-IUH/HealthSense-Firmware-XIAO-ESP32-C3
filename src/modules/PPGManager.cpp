@@ -38,9 +38,16 @@ bool PPGManager_begin(uint8_t interruptPin) {
   }
 
   Wire.setTimeOut(25);
-  particleSensor.setup(30, 4, 2, 400, 411, 4096);
-  particleSensor.setPulseAmplitudeRed(15);
-  particleSensor.setPulseAmplitudeIR(60);
+  // particleSensor.setup(30, 4, 2, 400, 411, 16384);
+  particleSensor.setup(30, 4, 2, 400, 215, 16384);
+  // particleSensor.setPulseAmplitudeRed(15);
+  // particleSensor.setPulseAmplitudeIR(60);
+  // particleSensor.setPulseAmplitudeRed(127);
+  // particleSensor.setPulseAmplitudeIR(127);
+  particleSensor.setPulseAmplitudeRed(80); 
+  particleSensor.setPulseAmplitudeIR(80);
+  // particleSensor.setPulseAmplitudeRed(60); 
+  // particleSensor.setPulseAmplitudeIR(60);
 
   pinMode(interruptPin, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(interruptPin), PPGManager_handleInterrupt, FALLING);
