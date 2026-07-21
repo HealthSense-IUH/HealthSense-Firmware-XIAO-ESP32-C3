@@ -40,13 +40,18 @@ bool PPGManager_begin(uint8_t interruptPin) {
   Wire.setTimeOut(25);
   // particleSensor.setup(30, 4, 2, 400, 411, 16384);
   particleSensor.setup(30, 4, 2, 400, 215, 16384);
+  // particleSensor.setup(30, 2, 2, 200, 215, 16384);
   // particleSensor.setPulseAmplitudeRed(15);
   // particleSensor.setPulseAmplitudeIR(60);
   // particleSensor.setPulseAmplitudeRed(127);
   // particleSensor.setPulseAmplitudeIR(127);
-  particleSensor.setPulseAmplitudeRed(80); 
-  particleSensor.setPulseAmplitudeIR(80);
-  // particleSensor.setPulseAmplitudeRed(60); 
+  particleSensor.setPulseAmplitudeRed(85);
+  particleSensor.setPulseAmplitudeIR(85);
+  // particleSensor.setPulseAmplitudeRed(80);
+  // particleSensor.setPulseAmplitudeIR(80);
+  // particleSensor.setPulseAmplitudeRed(50);
+  // particleSensor.setPulseAmplitudeIR(70);
+  // particleSensor.setPulseAmplitudeRed(60);
   // particleSensor.setPulseAmplitudeIR(60);
 
   pinMode(interruptPin, INPUT_PULLUP);
@@ -70,10 +75,19 @@ void PPGManager_shutDown() {
   particleSensor.shutDown();
 }
 
-static uint8_t filter3(uint8_t newVal) {
-  static uint8_t b[3] = {0,0,0};
-  b[0] = b[1]; b[1] = b[2]; b[2] = newVal;
-  uint8_t x=b[0], y=b[1], z=b[2];
+static uint8_t filter3_BPM(uint8_t newVal) {
+  static uint8_t b_bpm[3] = {0,0,0};
+  b_bpm[0] = b_bpm[1]; b_bpm[1] = b_bpm[2]; b_bpm[2] = newVal;
+  uint8_t x=b_bpm[0], y=b_bpm[1], z=b_bpm[2];
+  if ((x - y) * (z - x) >= 0) return x;
+  if ((y - x) * (z - y) >= 0) return y;
+  return z;
+}
+
+static uint8_t filter3_SpO2(uint8_t newVal) {
+  static uint8_t b_spo2[3] = {0,0,0};
+  b_spo2[0] = b_spo2[1]; b_spo2[1] = b_spo2[2]; b_spo2[2] = newVal;
+  uint8_t x=b_spo2[0], y=b_spo2[1], z=b_spo2[2];
   if ((x - y) * (z - x) >= 0) return x;
   if ((y - x) * (z - y) >= 0) return y;
   return z;
@@ -111,7 +125,7 @@ void PPGManager_process() {
       noFingerStartTime = 0;
       // package for BLE
       char tempStr[64];
-      sprintf(tempStr, "%lu,%u,%u\n", millis(), (uint32_t)redValue, (uint32_t)irValue);
+      sprintf(tempStr, "%lu,%u,%u,%u,%u\n", millis(), (uint32_t)redValue, (uint32_t)irValue, finalBPM, finalSpO2);
       if (strlen(ppgPayload) + strlen(tempStr) < sizeof(ppgPayload)) {
         strcat(ppgPayload, tempStr);
         ppgSampleCount++;
@@ -128,33 +142,39 @@ void PPGManager_process() {
         long delta = millis() - lastBeatTime;
         lastBeatTime = millis();
         float beatsPerMinute = 60000.0 / delta;
-        if (beatsPerMinute > 50 && beatsPerMinute < 150) {
+        if (beatsPerMinute > 40 && beatsPerMinute < 255) {
           if (beatAvg == 0) beatAvg = beatsPerMinute;
           else beatAvg = (beatAvg * 0.2) + (beatsPerMinute * 0.8);
-          finalBPM = filter3((uint8_t)beatAvg);
+          finalBPM = filter3_BPM((uint8_t)beatAvg);
         }
       }
 
       // SpO2 calculation
       if (bufferFull) {
-        uint32_t minRed = redBuffer[0], maxRed = redBuffer[0];
-        uint32_t minIR = irBuffer[0], maxIR = irBuffer[0];
-        for (int i = 1; i < BUFFER_SIZE_LOCAL; i++) {
-          if (redBuffer[i] < minRed) minRed = redBuffer[i];
-          if (redBuffer[i] > maxRed) maxRed = redBuffer[i];
-          if (irBuffer[i] < minIR) minIR = irBuffer[i];
-          if (irBuffer[i] > maxIR) maxIR = irBuffer[i];
-        }
-        long acRed = maxRed - minRed;
-        long dcRed = minRed;
-        long acIR = maxIR - minIR;
-        long dcIR = minIR;
-        if (acIR > 0 && dcRed > 0) {
-          float rValue = ((float)acRed / dcRed) / ((float)acIR / dcIR);
-          float spo2Calculated = 110.0 - (17.0 * rValue);
-          if (spo2Calculated > 100.0) spo2Calculated = 100.0;
-          if (spo2Calculated >= 80.0 && spo2Calculated <= 100.0) {
-            finalSpO2 = filter3((uint8_t)spo2Calculated);
+        static uint8_t spo2CalcCounter = 0;
+        spo2CalcCounter++;
+        if (spo2CalcCounter >= 100) { // 100Hz -> 100 mẫu = 1 giây
+          spo2CalcCounter = 0;
+          
+          uint32_t minRed = redBuffer[0], maxRed = redBuffer[0];
+          uint32_t minIR = irBuffer[0], maxIR = irBuffer[0];
+          for (int i = 1; i < BUFFER_SIZE_LOCAL; i++) {
+            if (redBuffer[i] < minRed) minRed = redBuffer[i];
+            if (redBuffer[i] > maxRed) maxRed = redBuffer[i];
+            if (irBuffer[i] < minIR) minIR = irBuffer[i];
+            if (irBuffer[i] > maxIR) maxIR = irBuffer[i];
+          }
+          long acRed = maxRed - minRed;
+          long dcRed = minRed;
+          long acIR = maxIR - minIR;
+          long dcIR = minIR;
+          if (acIR > 0 && dcRed > 0) {
+            float rValue = ((float)acRed / dcRed) / ((float)acIR / dcIR);
+            float spo2Calculated = 110.0 - (17.0 * rValue);
+            if (spo2Calculated > 100.0) spo2Calculated = 100.0;
+            if (spo2Calculated >= 80.0 && spo2Calculated <= 100.0) {
+              finalSpO2 = filter3_SpO2((uint8_t)spo2Calculated);
+            }
           }
         }
       }
@@ -196,3 +216,36 @@ bool PPGManager_popPacket(char* outBuf, size_t bufSize, size_t* outLen) {
 
 uint8_t PPGManager_getBPM() { return finalBPM; }
 uint8_t PPGManager_getSpO2() { return finalSpO2; }
+
+void PPGManager_setupPhase1() {
+  particleSensor.setup(30, 4, 2, 400, 215, 16384);
+  particleSensor.setPulseAmplitudeRed(85);
+  particleSensor.setPulseAmplitudeIR(85);
+  particleSensor.enableDATARDY();
+  // Clear internal state/buffers
+  bufferIndex = 0;
+  bufferFull = false;
+  finalBPM = 0;
+  finalSpO2 = 0;
+  beatAvg = 0;
+}
+
+void PPGManager_setupPhase2(bool lowPower) {
+  if (lowPower) {
+    particleSensor.setup(30, 2, 2, 100, 215, 16384);
+    particleSensor.setPulseAmplitudeRed(5);
+    particleSensor.setPulseAmplitudeIR(75);
+  } else {
+    particleSensor.setup(30, 2, 2, 100, 215, 16384);
+    particleSensor.setPulseAmplitudeRed(75);
+    particleSensor.setPulseAmplitudeIR(75);
+  }
+  particleSensor.enableDATARDY();
+  // Clear internal state/buffers
+  bufferIndex = 0;
+  bufferFull = false;
+  finalBPM = 0;
+  finalSpO2 = 0;
+  beatAvg = 0;
+}
+

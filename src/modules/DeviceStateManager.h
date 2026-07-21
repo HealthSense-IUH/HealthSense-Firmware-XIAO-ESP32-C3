@@ -25,7 +25,7 @@ enum DeviceEvent{
     EVT_BLE_START_SCREENING
 };
 
-void DeviceStateManager_begin(uint8_t buttonPin);
+void DeviceStateManager_begin(uint8_t buttonPin, uint8_t accelVddPin);
 void DeviceStateManager_handleButton();
 void DeviceStateManager_onEvent(DeviceEvent event);
 void DeviceStateManager_loop();
