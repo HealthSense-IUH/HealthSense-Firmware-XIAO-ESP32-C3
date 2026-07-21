@@ -14,6 +14,9 @@ void PPGManager_handleInterrupt();
 void PPGManager_wakeUp();
 void PPGManager_shutDown();
 bool PPGManager_popNoFingerEvent();
+void PPGManager_setupPhase1();
+void PPGManager_setupPhase2(bool lowPower);
 long PPGManager_readIR();
+
 
 #endif

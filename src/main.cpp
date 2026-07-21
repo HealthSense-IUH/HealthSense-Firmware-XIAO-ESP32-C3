@@ -15,6 +15,7 @@
 const byte Max30102InterruptPin = D6;
 
 void setup() {
+  setCpuFrequencyMhz(80); // Giảm CPU 240MHz -> 80MHz để tiết kiệm pin
   Serial.begin(115200);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
 
@@ -54,7 +55,7 @@ void setup() {
   }
   Serial.println("MAX30102 OK!");
 
-  DeviceStateManager_begin(BUTTON_PIN);
+  DeviceStateManager_begin(BUTTON_PIN, ACCEL_VDD);
 }
 
 void loop() {
@@ -76,13 +77,32 @@ void loop() {
     Serial.println("[UNWEAR] Da thao dong ho. Tat LED tiet kiem pin!");
   }
 
-  char packet[512];
-  size_t len = 0;
-  if (PPGManager_popPacket(packet, sizeof(packet), &len)) {
-    if (BLEManager_isConnected()) {
-      BLEManager_notify(packet, len);
+  DeviceMode mode = DeviceStateManager_getMode();
+
+  if (mode == MODE_WORKOUT) {
+    // Workout: chỉ gửi vitals mỗi 1 giây (không gửi raw PPG vì tín hiệu nhiễu khi vận động)
+    static unsigned long lastVitalsSend = 0;
+    if (millis() - lastVitalsSend >= 1000 && BLEManager_isConnected()) {
+      lastVitalsSend = millis();
+      char buf[64];
+      size_t len = (size_t)snprintf(buf, sizeof(buf), "W:%lu,%u,%u\n",
+                                    millis(), PPGManager_getBPM(), PPGManager_getSpO2());
+      BLEManager_notifyReport(buf, len);
+    }
+    // Drain PPG packet buffer để tránh tràn bộ nhớ (không gửi raw PPG ở workout)
+    { char drain[512]; size_t dl = 0; PPGManager_popPacket(drain, sizeof(drain), &dl); }
+
+  } else if (mode == MODE_MEASURE || mode == MODE_SCREENING) {
+    // Measure / Screening: gửi batch PPG + vitals (format: millis,red,ir,bpm,spo2)
+    char packet[512];
+    size_t len = 0;
+    if (PPGManager_popPacket(packet, sizeof(packet), &len)) {
+      if (BLEManager_isConnected()) {
+        BLEManager_notify(packet, len);
+      }
     }
   }
+  // IDLE / SHUTDOWN / TURN_ON: không gửi BLE data
 
   DeviceStateManager_loop();
 
