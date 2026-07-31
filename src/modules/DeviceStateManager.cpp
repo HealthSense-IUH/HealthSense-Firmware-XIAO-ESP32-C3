@@ -19,8 +19,9 @@ static bool isScreening = false;
 
 // Screening cycle management (10-minute cycle with 2 phases)
 static unsigned long screeningCycleStart = 0;
-static uint8_t screeningPhase = 0;           // 0: idle, 1: Phase 1 (1 min measure), 2: Phase 1 sleep dynamic, 3: Phase 2 (30s measure), 4: Phase 2 sleep dynamic, 5: Phase 1 micro-retry wait (30s)
+// 0: idle, 1: Phase 1 (1 min measure), 2: Phase 1 sleep dynamic, 3: Phase 2 (30s measure), 4: Phase 2 sleep dynamic, 5: Phase 1 micro-retry wait (30s)
 static uint8_t screeningRetryCount = 0;
+static uint8_t screeningPhase = 0;
 static unsigned long phaseStartTime = 0;
 static unsigned long retrySleepStart = 0;
 static unsigned long phaseSleepStart = 0;
@@ -129,7 +130,7 @@ void DeviceStateManager_onEvent(DeviceEvent event) {
                         
                         if (screeningRetryCount < 3) {
                             // Đi ngủ chớp nhoáng 30 giây
-                            screeningPhase = 5;
+                            screeningPhase = 9;
                             retrySleepStart = millis();
                             Serial.print("[SCREENING] Micro-Retry lần ");
                             Serial.print(screeningRetryCount);
@@ -142,8 +143,8 @@ void DeviceStateManager_onEvent(DeviceEvent event) {
                             // Chuyển sang pha nghỉ chờ Pha 2
                             screeningPhase = 2;
                             phaseSleepStart = millis();
-                            // Tính toán thời gian ngủ động để đến mốc phút thứ 5
-                            long targetTime = screeningCycleStart + 5 * 60 * 1000;
+                            // Tính toán thời gian ngủ động để đến mốc phút tiếp theo
+                            long targetTime = screeningCycleStart + 150 * 1000;
                             long remaining = targetTime - millis();
                             phaseSleepDuration = remaining > 0 ? remaining : 0;
                         }
@@ -241,57 +242,76 @@ void DeviceStateManager_loop() {
                 Serial.print(" | Avg SpO2: ");
                 Serial.println(avgSpO2);
                 
-                // Gửi qua Characteristic 2 (Báo cáo trung bình)
+                // Gửi qua Characteristic 2 (Báo cáo Pha 1 hoàn tất)
                 if (BLEManager_isConnected()) {
                     char report[32];
-                    snprintf(report, sizeof(report), "R:%u,%u\n", avgBPM, avgSpO2);
+                    snprintf(report, sizeof(report), "R1:%u,%u\n", avgBPM, avgSpO2);
                     BLEManager_notifyReport(report, strlen(report));
                 }
                 
-                // Chuyển sang pha nghỉ chờ Pha 2
+                // Chuyển sang pha nghỉ chờ Pha 2 (mốc 150s = 2.5 phút)
                 screeningPhase = 2;
                 phaseSleepStart = millis();
-                long targetTime = screeningCycleStart + 5 * 60 * 1000;
+                long targetTime = screeningCycleStart + 150 * 1000UL;
                 long remaining = targetTime - (long)millis();
                 phaseSleepDuration = remaining > 0 ? remaining : 0;
                 
                 Serial.print("[SCREENING] Ngủ động ");
                 Serial.print(phaseSleepDuration / 1000);
-                Serial.println(" giây để đến mốc phút thứ 5...");
+                Serial.println(" giây để đến mốc 2.5 phút (Pha 2)...");
             }
         } 
-        else if (screeningPhase == 5) {
+        else if (screeningPhase == 9) {
             // ĐANG NGỦ MICRO-RETRY (30 giây)
             if (now - retrySleepStart >= 30000UL) {
-                Serial.println("[SCREENING] Hết 30 giây ngủ micro-retry. Thức dậy đo lại Pha 1...");
-                screeningPhase = 1;
-                phaseStartTime = millis();
-                bpmSum = 0;
-                spo2Sum = 0;
-                validSampleCount = 0;
-                lastSampleAccumTime = millis();
-                
-                PPGManager_wakeUp();
-                PPGManager_setupPhase1();
+                long timeRemainingForP1 = (long)(screeningCycleStart + 150000UL) - (long)now;
+                if (timeRemainingForP1 < 60000L) {
+                    // Thời gian còn lại đến mốc Pha 2 < 60s, không đủ để đo trọn vẹn 1 phút Pha 1
+                    Serial.println("[SCREENING] Thời gian còn lại < 60s, không đủ đo trọn vẹn Pha 1. Hủy đo Pha 1 và chuyển sang chờ Pha 2...");
+                    isSpo2Missed = true;
+                    screeningPhase = 2;
+                    phaseSleepStart = millis();
+                    phaseSleepDuration = timeRemainingForP1 > 0 ? timeRemainingForP1 : 0;
+                } else {
+                    // Đủ thời gian (>= 60s) -> Thức dậy đo lại Pha 1
+                    Serial.println("[SCREENING] Hết 30 giây ngủ micro-retry. Thức dậy đo lại Pha 1...");
+                    screeningPhase = 1;
+                    phaseStartTime = millis();
+                    bpmSum = 0;
+                    spo2Sum = 0;
+                    validSampleCount = 0;
+                    lastSampleAccumTime = millis();
+                    
+                    PPGManager_wakeUp();
+                    PPGManager_setupPhase1();
+                }
             }
         }
-        else if (screeningPhase == 2) {
-            // ĐANG NGHỈ CHỜ PHA 2 (đến mốc phút thứ 5)
+        else if (screeningPhase == 2 || screeningPhase == 4 || screeningPhase == 6) {
+            // ĐANG NGHỈ CHỜ PHA TIẾP THEO
             if (now - phaseSleepStart >= phaseSleepDuration) {
-                Serial.println("[SCREENING] Đã đến mốc phút thứ 5. Bắt đầu Pha 2...");
-                screeningPhase = 3;
+                uint8_t nextMeasurePhase = 3;
+                if (screeningPhase == 2) nextMeasurePhase = 3;      // Pha 2 (mốc 2.5 min)
+                else if (screeningPhase == 4) nextMeasurePhase = 5; // Pha 3 (mốc 5.0 min)
+                else if (screeningPhase == 6) nextMeasurePhase = 7; // Pha 4 (mốc 7.5 min)
+
+                screeningPhase = nextMeasurePhase;
                 phaseStartTime = millis();
                 bpmSum = 0;
                 spo2Sum = 0;
                 validSampleCount = 0;
                 lastSampleAccumTime = millis();
                 
+                Serial.print("[SCREENING] Thức dậy bắt đầu Pha đo thứ ");
+                Serial.print((screeningPhase / 2) + 1);
+                Serial.println("...");
+
                 PPGManager_wakeUp();
                 PPGManager_setupPhase2(isSpo2Missed == false); // lowPower = true nếu không bị lỡ SpO2
             }
         }
-        else if (screeningPhase == 3) {
-            // ĐANG ĐO PHA 2 (30 giây)
+        else if (screeningPhase == 3 || screeningPhase == 5 || screeningPhase == 7) {
+            // ĐANG ĐO PHA PHỤ (Pha 2, 3, 4 - 30 giây)
             // Tích luỹ BPM/SpO2 mỗi 1 giây
             if (now - lastSampleAccumTime >= 1000) {
                 lastSampleAccumTime = now;
@@ -324,44 +344,73 @@ void DeviceStateManager_loop() {
                 if (avgBPM > 40 && avgBPM < 255) {
                     finalBPMReport = avgBPM;
                 } else {
-                    finalBPMReport = 0; // Thấp hoặc quá cao/lỗi (BPM <= 40 hoặc BPM >= 255)
+                    finalBPMReport = 0;
                 }
                 
                 // Xác định SpO2 gửi đi
                 uint8_t finalSpO2Report = isSpo2Missed ? avgSpO2 : phase1AvgSpO2;
+                uint8_t phaseNumber = (screeningPhase / 2) + 1;
                 
-                Serial.print("[SCREENING] Pha 2 hoàn tất! Avg BPM: ");
+                Serial.print("[SCREENING] Pha ");
+                Serial.print(phaseNumber);
+                Serial.print(" hoàn tất! Avg BPM: ");
                 Serial.print(avgBPM);
                 Serial.print(" (Gửi: ");
                 Serial.print(finalBPMReport);
                 Serial.print(") | SpO2: ");
                 Serial.println(finalSpO2Report);
                 
-                // Gửi qua Characteristic 2 (Báo cáo trung bình)
+                // Gửi qua Characteristic 2 (Báo cáo trung bình các pha 2, 3, 4)
                 if (BLEManager_isConnected()) {
                     char report[32];
-                    snprintf(report, sizeof(report), "R:%u,%u\n", finalBPMReport, finalSpO2Report);
+                    snprintf(report, sizeof(report), "R2:%u,%u\n", finalBPMReport, finalSpO2Report);
                     BLEManager_notifyReport(report, strlen(report));
                 }
                 
-                // Chuyển sang pha nghỉ kết thúc chu kỳ (chờ đến mốc phút thứ 10)
-                screeningPhase = 4;
+                // Tính toán mốc mục tiêu cho pha tiếp theo
+                uint8_t nextSleepPhase = 4;
+                unsigned long targetMs = 300000UL; // Mốc mặc định Pha 2 -> 3 (300s = 5 min)
+
+                if (screeningPhase == 3) {
+                    nextSleepPhase = 4;
+                    targetMs = 300000UL; // 5.0 phút
+                } else if (screeningPhase == 5) {
+                    nextSleepPhase = 6;
+                    targetMs = 450000UL; // 7.5 phút
+                } else if (screeningPhase == 7) {
+                    nextSleepPhase = 8;
+                    targetMs = 600000UL; // 10.0 phút (Kết thúc chu kỳ)
+                }
+
+                screeningPhase = nextSleepPhase;
                 phaseSleepStart = millis();
-                long targetTime = screeningCycleStart + 10 * 60 * 1000;
+                long targetTime = screeningCycleStart + targetMs;
                 long remaining = targetTime - (long)millis();
                 phaseSleepDuration = remaining > 0 ? remaining : 0;
                 
                 Serial.print("[SCREENING] Ngủ động ");
                 Serial.print(phaseSleepDuration / 1000);
-                Serial.println(" giây để kết thúc chu kỳ 10 phút...");
+                Serial.print(" giây để đến mốc ");
+                Serial.print(targetMs / 1000);
+                Serial.println("s...");
             }
         }
-        else if (screeningPhase == 4) {
-            // ĐANG NGHỈ KẾT THÚC CHU KỲ (đến mốc phút thứ 10)
+        else if (screeningPhase == 8) {
+            // ĐANG NGHỈ KẾT THÚC CHU KỲ (đến mốc 600s = 10 phút) -> Bắt đầu lại chu kỳ 10 phút mới
             if (now - phaseSleepStart >= phaseSleepDuration) {
-                Serial.println("[SCREENING] Đã hoàn thành 10 phút tầm soát. Chuyển về IDLE.");
-                screeningPhase = 0;
-                DeviceStateManager_requestMode(MODE_IDLE);
+                Serial.println("[SCREENING] Đã xong 10 phút chu kỳ. Bắt đầu chu kỳ 10 phút mới (Pha 1)...");
+                screeningCycleStart = millis();
+                screeningPhase = 1;
+                phaseStartTime = millis();
+                bpmSum = 0;
+                spo2Sum = 0;
+                validSampleCount = 0;
+                screeningRetryCount = 0;
+                isSpo2Missed = false;
+                lastSampleAccumTime = millis();
+                
+                PPGManager_wakeUp();
+                PPGManager_setupPhase1();
             }
         }
     }
