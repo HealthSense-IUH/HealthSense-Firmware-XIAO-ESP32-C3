@@ -16,4 +16,8 @@ void BLEManager_stopAdvertising();
 // Signature: void myHandler(const char* cmd)
 void BLEManager_setCommandCallback(void (*callback)(const char* cmd));
 
+// Đọc và cập nhật thời lượng pin (Battery Service 0x180F)
+uint8_t BLEManager_readBatteryLevel();
+void BLEManager_updateBatteryLevel();
+
 #endif

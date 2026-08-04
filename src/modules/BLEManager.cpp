@@ -8,11 +8,32 @@
 static BLEServer* pServer = nullptr;
 static BLECharacteristic* pCharacteristic = nullptr;      // NOTIFY (device -> phone) raw PPG
 static BLECharacteristic* pReportCharacteristic = nullptr;  // NOTIFY (device -> phone) report vitals
-static BLECharacteristic* pWriteCharacteristic = nullptr;  // WRITE  (phone -> device)
+static BLECharacteristic* pWriteCharacteristic = nullptr;   // WRITE  (phone -> device)
+static BLECharacteristic* pBatteryCharacteristic = nullptr; // READ | NOTIFY (Battery Service 0x180F -> 0x2A19)
 static bool deviceConnected = false;
 
 // Con trỏ tới hàm xử lý lệnh nhận từ điện thoại, được đăng ký bởi DeviceStateManager
 static void (*commandCallback)(const char* cmd) = nullptr;
+
+uint8_t BLEManager_readBatteryLevel() {
+  // XIAO ESP32-C3 có mạch chia điện áp 100k/100k (tỷ lệ 1:2) nối vào chân ADC A0
+  uint32_t pinMilliVolts = analogReadMilliVolts(A0);
+  uint32_t batteryMilliVolts = pinMilliVolts * 2;
+
+  if (batteryMilliVolts >= 4200) return 100;
+  if (batteryMilliVolts <= 3300) return 0;
+  return (uint8_t)(((batteryMilliVolts - 3300) * 100) / (4200 - 3300));
+}
+
+void BLEManager_updateBatteryLevel() {
+  if (pBatteryCharacteristic != nullptr) {
+    uint8_t level = BLEManager_readBatteryLevel();
+    pBatteryCharacteristic->setValue(&level, 1);
+    if (deviceConnected) {
+      pBatteryCharacteristic->notify();
+    }
+  }
+}
 
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
@@ -78,8 +99,20 @@ void BLEManager_begin() {
 
   pService->start();
 
+  // Khởi tạo Battery Service chuẩn Bluetooth SIG (0x180F)
+  BLEService *pBatteryService = pServer->createService(BLEUUID((uint16_t)0x180F));
+  pBatteryCharacteristic = pBatteryService->createCharacteristic(
+                        BLEUUID((uint16_t)0x2A19),
+                        BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+                      );
+  pBatteryCharacteristic->addDescriptor(new BLE2902());
+  uint8_t initBatteryLevel = BLEManager_readBatteryLevel();
+  pBatteryCharacteristic->setValue(&initBatteryLevel, 1);
+  pBatteryService->start();
+
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID("4fafc201-1fb5-459e-8fcc-c5c9c331914b");
+  pAdvertising->addServiceUUID(BLEUUID((uint16_t)0x180F));
   pAdvertising->setScanResponse(false);
   BLEDevice::startAdvertising();
 }

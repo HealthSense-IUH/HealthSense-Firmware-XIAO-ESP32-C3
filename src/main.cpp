@@ -106,6 +106,12 @@ void loop() {
 
   DeviceStateManager_loop();
 
+  static unsigned long lastBatteryUpdateTime = 0;
+  if (millis() - lastBatteryUpdateTime >= 30000) {
+    lastBatteryUpdateTime = millis();
+    BLEManager_updateBatteryLevel();
+  }
+
   static unsigned long lastSerialPrintTime = 0;
   if (millis() - lastSerialPrintTime >= 1000) {
     lastSerialPrintTime = millis();
