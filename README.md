@@ -1,4 +1,4 @@
-# HealthSense Firmware
+# HealthSense Firmware For Seeed XIAO ESP32-C3
 
 ## Tiếng Việt
 
