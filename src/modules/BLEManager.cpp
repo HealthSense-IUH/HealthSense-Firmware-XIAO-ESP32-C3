@@ -16,13 +16,14 @@ static bool deviceConnected = false;
 static void (*commandCallback)(const char* cmd) = nullptr;
 
 uint8_t BLEManager_readBatteryLevel() {
-  // XIAO ESP32-C3 có mạch chia điện áp 100k/100k (tỷ lệ 1:2) nối vào chân ADC A0
-  uint32_t pinMilliVolts = analogReadMilliVolts(A0);
+  // Chân nối giữa 2 trở 100K là chân D1
+  uint32_t pinMilliVolts = analogReadMilliVolts(D1);
   uint32_t batteryMilliVolts = pinMilliVolts * 2;
 
-  if (batteryMilliVolts >= 4200) return 100;
+  // Hiệu chỉnh ngưỡng: do suy hao mạch/sai số trở, điện áp tối đa ghi nhận là ~4100mV
+  if (batteryMilliVolts >= 4100) return 100;
   if (batteryMilliVolts <= 3300) return 0;
-  return (uint8_t)(((batteryMilliVolts - 3300) * 100) / (4200 - 3300));
+  return (uint8_t)(((batteryMilliVolts - 3300) * 100) / (4100 - 3300));
 }
 
 void BLEManager_updateBatteryLevel() {
