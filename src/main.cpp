@@ -7,7 +7,7 @@
 #include "modules/DeviceStateManager.h"
 
 // >>> CẤU HÌNH PINOUT <<<
-#define BUTTON_PIN D1
+#define BUTTON_PIN D3
 #define LED_PIN    D0
 #define ACCEL_VDD  D10   // Nguồn MPU6050 nối chân D10
 
