@@ -125,6 +125,23 @@ void DeviceStateManager_onEvent(DeviceEvent event) {
                 if (currentMode == MODE_SCREENING) {
                     if (screeningPhase == 1) {
                         Serial.println("[SCREENING] Phát hiện chuyển động! Ngừng đo Pha 1 và thử lại chớp nhoáng...");
+                        
+                        // Cứu vớt dữ liệu: Nếu đã thu thập được > 10 mẫu hợp lệ trước khi bị rung tay
+                        if (validSampleCount > 10) {
+                            uint8_t avgBPM = bpmSum / validSampleCount;
+                            uint8_t avgSpO2 = spo2Sum / validSampleCount;
+                            char report[32];
+                            snprintf(report, sizeof(report), "R1:%u,%u\n", avgBPM, avgSpO2);
+                            if (BLEManager_isConnected()) {
+                                BLEManager_notifyReport(report, strlen(report));
+                                Serial.print("[SCREENING] Đã vớt vát dữ liệu sinh hiệu trước khi hủy: ");
+                                Serial.print(avgBPM);
+                                Serial.print(" BPM, ");
+                                Serial.print(avgSpO2);
+                                Serial.println("%");
+                            }
+                        }
+                        
                         PPGManager_shutDown(); // Tắt cảm biến ngay lập tức
                         screeningRetryCount++;
                         
@@ -176,7 +193,13 @@ void DeviceStateManager_onEvent(DeviceEvent event) {
         case EVT_BLE_START_SCREENING:
             Serial.println("event BLE_START_SCREENING");
             sendBLECommand("CMD:START_SCREENING\n");
-            DeviceStateManager_requestMode(MODE_SCREENING);
+            if (currentMode == MODE_SCREENING) {
+                // Ép khởi động lại chu kỳ nếu đang ở trong chế độ chờ/ngủ của Screening
+                exitMode(MODE_SCREENING);
+                enterMode(MODE_SCREENING);
+            } else {
+                DeviceStateManager_requestMode(MODE_SCREENING);
+            }
             break;
     }
 }
