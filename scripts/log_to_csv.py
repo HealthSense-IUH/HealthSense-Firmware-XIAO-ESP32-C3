@@ -5,122 +5,162 @@ import csv
 import time
 from datetime import datetime
 
-# 1. Tìm cổng COM tự động
-ports = serial.tools.list_ports.comports()
-if not ports:
-    print("❌ Không tìm thấy cổng COM nào. Hãy cắm mạch vào máy tính!")
-    exit(1)
+# ==============================================================================
+# CONFIGURATION CONSTANTS
+# ==============================================================================
+DEFAULT_BAUDRATE = 115200
+SERIAL_TIMEOUT_SEC = 1
+DATA_DIR = "data"
+CSV_HEADER = ['Time(ms)', 'IR', 'RED', 'BPM', 'SpO2', 'Motion']
 
-print("🔍 Các cổng COM đang cắm vào máy:")
-for i, p in enumerate(ports):
-    print(f"  [{i}] {p.device} - {p.description}")
+# ==============================================================================
+# MESSAGE CONSTANTS
+# ==============================================================================
+MSG_NO_PORTS_FOUND = "[ERROR] No COM ports found. Please connect your device to the computer."
+MSG_AVAILABLE_PORTS_HEADER = "[INFO] Available COM ports:"
+MSG_SELECT_PORT_PROMPT = "[INPUT] Select COM port index (0 to {max_idx}) [Default 0]: "
+MSG_CONNECTING = "[INFO] Connecting to device on {port} (Baudrate: {baudrate})..."
+MSG_CONNECTED = "[INFO] Connected successfully! Listening for data..."
+MSG_CONNECT_ERROR = "[ERROR] Connection failed: {error}"
+MSG_WAITING_DATA = "[INFO] Waiting for measurement data... (Each session will be saved to a separate CSV file)"
+MSG_STOP_HINT = "[INFO] Press Ctrl+C to stop.\n"
+MSG_SESSION_START = "[SESSION {session_id}] Started logging to: {filename}"
+MSG_SESSION_SAVED = "[SESSION] Closed file: {filename}{reason_str}"
+MSG_RECORD_SAVED = " -> Saved record to CSV"
+MSG_PROCESS_STOPPED = "\n[INFO] Process stopped by user."
 
-if len(ports) > 1:
-    idx = input(f"👉 Chọn số thứ tự cổng COM của ESP32 (0 đến {len(ports)-1}) [Mặc định 0]: ")
-    idx = int(idx) if idx.strip().isdigit() else 0
-    PORT = ports[idx].device
-else:
-    PORT = ports[0].device
-BAUDRATE = 115200
+# Protocol / Trigger strings from Firmware
+TAG_SCREENING = "[SCREENING]"
+TAG_UNWEAR = "[UNWEAR]"
+KEYWORDS_DONE = ("thành công", "hoàn tất", "thanh cong", "hoan tat")
+KEYWORDS_ABORT = ("Ngừng đo", "Ngung do")
 
-print(f"🔌 Đang kết nối với mạch qua cổng {PORT}...")
+REASON_PHASE_DONE = "phase completed"
+REASON_MOTION_ABORT = "aborted due to motion"
+REASON_DEVICE_UNWEAR = "device unstrapped"
+REASON_MANUAL_STOP = "manual stop"
 
-try:
-    # Cấu hình cổng COM nhưng chưa mở
-    ser = serial.Serial()
-    ser.port = PORT
-    ser.baudrate = BAUDRATE
-    ser.timeout = 1
-    # Bật DTR/RTS (rất quan trọng cho mạch ESP32-C3 Native USB)
-    ser.dtr = True
-    ser.rts = True
-    ser.open()
-    
-    time.sleep(1) # Đợi mạch khởi động
-    print("✅ Kết nối thành công! Đang lắng nghe dữ liệu...")
-except Exception as e:
-    print(f"❌ Lỗi kết nối: {e}")
-    exit(1)
 
-# 2. Tạo thư mục data nếu chưa có
-if not os.path.exists('data'):
-    os.makedirs('data')
-
-print("⏳ Chờ thiết bị bắt đầu đo... (mỗi lần đo sẽ được lưu vào 1 file riêng)")
-print("🛑 Nhấn Ctrl+C để dừng.\n")
-
-# --- Quản lý session ---
+# ==============================================================================
+# SESSION MANAGEMENT
+# ==============================================================================
 current_file = None
 current_writer = None
 current_filename = None
 session_count = 0
 
+
 def open_new_session():
-    """Mở file CSV mới cho một lần đo."""
+    """Open a new CSV file for a measurement session."""
     global current_file, current_writer, current_filename, session_count
     session_count += 1
-    current_filename = f"data/do_{datetime.now().strftime('%Y%m%d_%H%M%S')}_session{session_count}.csv"
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    current_filename = os.path.join(DATA_DIR, f"measurement_{timestamp}_session{session_count}.csv")
     current_file = open(current_filename, mode='w', newline='', encoding='utf-8')
     current_writer = csv.writer(current_file)
-    current_writer.writerow(['Time(ms)', 'IR', 'RED', 'BPM', 'SpO2', 'Motion'])
-    print(f"\n📂 [Session {session_count}] Bắt đầu lưu vào: {current_filename}")
+    current_writer.writerow(CSV_HEADER)
+    print(MSG_SESSION_START.format(session_id=session_count, filename=current_filename))
+
 
 def close_current_session(reason=""):
-    """Đóng file CSV của session hiện tại."""
+    """Close the current session's CSV file."""
     global current_file, current_writer, current_filename
     if current_file is not None:
         current_file.flush()
         current_file.close()
-        print(f"✅ Đã lưu xong file: {current_filename}{' (' + reason + ')' if reason else ''}")
+        reason_str = f" ({reason})" if reason else ""
+        print(MSG_SESSION_SAVED.format(filename=current_filename, reason_str=reason_str))
         current_file = None
         current_writer = None
         current_filename = None
 
-try:
-    while True:
-        # Đọc 1 dòng từ Serial (timeout=1s)
-        raw_line = ser.readline()
 
-        if not raw_line:
-            continue
+# ==============================================================================
+# MAIN ROUTINE
+# ==============================================================================
+def main():
+    # 1. Discover available COM ports
+    ports = serial.tools.list_ports.comports()
+    if not ports:
+        print(MSG_NO_PORTS_FOUND)
+        exit(1)
 
-        line = raw_line.decode('utf-8', errors='ignore').strip()
+    print(MSG_AVAILABLE_PORTS_HEADER)
+    for i, p in enumerate(ports):
+        print(f"  [{i}] {p.device} - {p.description}")
 
-        # IN RA TẤT CẢ MỌI THỨ NHẬN ĐƯỢC ĐỂ DEBUG
-        print(f"Nhận được: {line}")
+    if len(ports) > 1:
+        idx_raw = input(MSG_SELECT_PORT_PROMPT.format(max_idx=len(ports) - 1))
+        idx = int(idx_raw) if idx_raw.strip().isdigit() and 0 <= int(idx_raw) < len(ports) else 0
+        port_name = ports[idx].device
+    else:
+        port_name = ports[0].device
 
-        # --- Phát hiện KẾT THÚC session ---
-        # Firmware in "[SCREENING] Pha 1 thành công!" khi xong pha đo 1 phút
-        # Firmware in "[SCREENING] Pha X hoàn tất!" khi xong các pha đo 30s
-        # Firmware in "[SCREENING] Phát hiện chuyển động! Ngừng đo Pha 1..." khi pha đo bị hủy do rung tay
-        # Firmware in "[UNWEAR] Da thao dong ho" khi tháo thiết bị
-        is_phase_done = "[SCREENING]" in line and ("thành công" in line or "hoàn tất" in line)
-        is_phase_aborted = "[SCREENING]" in line and "Ngừng đo" in line
-        if is_phase_done or is_phase_aborted or "[UNWEAR]" in line:
-            if current_file is not None:
-                if is_phase_done:
-                    reason = "xong pha đo"
-                elif is_phase_aborted:
-                    reason = "hủy do chuyển động"
-                else:
-                    reason = "tháo thiết bị"
-                close_current_session(reason)
-            continue
+    print(MSG_CONNECTING.format(port=port_name, baudrate=DEFAULT_BAUDRATE))
 
-        # --- Ghi dữ liệu PPG vào file ---
-        # Định dạng: Time, IR, RED, BPM, SpO2, Motion -> có 5 dấu phẩy
-        if line.count(',') == 5 and not line.startswith('['):
-            # Mở file mới nếu chưa có session nào đang mở
-            if current_file is None:
-                open_new_session()
+    try:
+        ser = serial.Serial()
+        ser.port = port_name
+        ser.baudrate = DEFAULT_BAUDRATE
+        ser.timeout = SERIAL_TIMEOUT_SEC
+        # Enable DTR/RTS (Required for ESP32-C3 Native USB)
+        ser.dtr = True
+        ser.rts = True
+        ser.open()
+        time.sleep(1)
+        print(MSG_CONNECTED)
+    except Exception as e:
+        print(MSG_CONNECT_ERROR.format(error=e))
+        exit(1)
 
-            data = line.split(',')
-            current_writer.writerow(data)
-            current_file.flush() # Đảm bảo ghi ngay lập tức không bị crash mất dữ liệu
-            print(" -> Đã lưu vào CSV!")
+    # 2. Ensure data directory exists
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
 
-except KeyboardInterrupt:
-    print("\n🛑 Đã dừng.")
-    close_current_session("dừng thủ công")
-finally:
-    ser.close()
+    print(MSG_WAITING_DATA)
+    print(MSG_STOP_HINT)
+
+    try:
+        while True:
+            raw_line = ser.readline()
+            if not raw_line:
+                continue
+
+            line = raw_line.decode('utf-8', errors='ignore').strip()
+            print(f"[RAW] {line}")
+
+            # Check for completion or abort signals from firmware
+            is_phase_done = TAG_SCREENING in line and any(kw in line for kw in KEYWORDS_DONE)
+            is_phase_aborted = TAG_SCREENING in line and any(kw in line for kw in KEYWORDS_ABORT)
+            is_unwear = TAG_UNWEAR in line
+
+            if is_phase_done or is_phase_aborted or is_unwear:
+                if current_file is not None:
+                    if is_phase_done:
+                        reason = REASON_PHASE_DONE
+                    elif is_phase_aborted:
+                        reason = REASON_MOTION_ABORT
+                    else:
+                        reason = REASON_DEVICE_UNWEAR
+                    close_current_session(reason)
+                continue
+
+            # Record sample data (Format: Time, IR, RED, BPM, SpO2, Motion -> 5 commas)
+            if line.count(',') == 5 and not line.startswith('['):
+                if current_file is None:
+                    open_new_session()
+
+                data = line.split(',')
+                current_writer.writerow(data)
+                current_file.flush()
+                print(MSG_RECORD_SAVED)
+
+    except KeyboardInterrupt:
+        print(MSG_PROCESS_STOPPED)
+        close_current_session(REASON_MANUAL_STOP)
+    finally:
+        ser.close()
+
+
+if __name__ == "__main__":
+    main()
