@@ -90,11 +90,20 @@ try:
         print(f"Nhận được: {line}")
 
         # --- Phát hiện KẾT THÚC session ---
-        # Firmware in "[SCREENING] Xong 1 phut" khi hết 60s đo
+        # Firmware in "[SCREENING] Pha 1 thành công!" khi xong pha đo 1 phút
+        # Firmware in "[SCREENING] Pha X hoàn tất!" khi xong các pha đo 30s
+        # Firmware in "[SCREENING] Phát hiện chuyển động! Ngừng đo Pha 1..." khi pha đo bị hủy do rung tay
         # Firmware in "[UNWEAR] Da thao dong ho" khi tháo thiết bị
-        if "[SCREENING] Xong 1 phut" in line or "[UNWEAR]" in line:
+        is_phase_done = "[SCREENING]" in line and ("thành công" in line or "hoàn tất" in line)
+        is_phase_aborted = "[SCREENING]" in line and "Ngừng đo" in line
+        if is_phase_done or is_phase_aborted or "[UNWEAR]" in line:
             if current_file is not None:
-                reason = "hết 60s đo" if "[SCREENING]" in line else "tháo thiết bị"
+                if is_phase_done:
+                    reason = "xong pha đo"
+                elif is_phase_aborted:
+                    reason = "hủy do chuyển động"
+                else:
+                    reason = "tháo thiết bị"
                 close_current_session(reason)
             continue
 
