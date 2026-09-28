@@ -36,9 +36,60 @@ void BLEManager_updateBatteryLevel() {
   }
 }
 
+struct OfflineSample {
+    uint32_t timestampMs;
+    uint8_t bpm;
+    uint32_t steps;
+};
+
+#define MAX_OFFLINE_SAMPLES 1200
+static OfflineSample offlineRingBuffer[MAX_OFFLINE_SAMPLES];
+static uint16_t offlineHead = 0;
+static uint16_t offlineTail = 0;
+static uint16_t offlineCount = 0;
+
+void BLEManager_pushOfflineSample(uint8_t bpm, uint32_t steps) {
+    if (deviceConnected) return; // Chỉ ghi đệm khi mất kết nối BLE
+
+    offlineRingBuffer[offlineHead].timestampMs = millis();
+    offlineRingBuffer[offlineHead].bpm = bpm;
+    offlineRingBuffer[offlineHead].steps = steps;
+
+    offlineHead = (offlineHead + 1) % MAX_OFFLINE_SAMPLES;
+    if (offlineCount < MAX_OFFLINE_SAMPLES) {
+        offlineCount++;
+    } else {
+        // Tràn bộ nhớ ring buffer, đè dữ liệu cũ nhất
+        offlineTail = (offlineTail + 1) % MAX_OFFLINE_SAMPLES;
+    }
+}
+
+void BLEManager_flushOfflineBuffer() {
+    if (!deviceConnected || offlineCount == 0 || pReportCharacteristic == nullptr) return;
+
+    Serial.print("[BLE] Đang nhả bù dữ liệu offline: ");
+    Serial.print(offlineCount);
+    Serial.println(" mẫu");
+
+    while (offlineCount > 0 && deviceConnected) {
+        OfflineSample sample = offlineRingBuffer[offlineTail];
+        offlineTail = (offlineTail + 1) % MAX_OFFLINE_SAMPLES;
+        offlineCount--;
+
+        char resyncMsg[64];
+        snprintf(resyncMsg, sizeof(resyncMsg), "CMD:RESYNC_DATA,%lu,%u,%lu\n",
+                 (unsigned long)sample.timestampMs, (unsigned int)sample.bpm, (unsigned long)sample.steps);
+
+        pReportCharacteristic->setValue((uint8_t*)resyncMsg, strlen(resyncMsg));
+        pReportCharacteristic->notify();
+        delay(35); // Tránh ngập gói tin BLE
+    }
+}
+
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
       deviceConnected = true;
+      BLEManager_flushOfflineBuffer();
     };
     void onDisconnect(BLEServer* pServer) {
       deviceConnected = false;

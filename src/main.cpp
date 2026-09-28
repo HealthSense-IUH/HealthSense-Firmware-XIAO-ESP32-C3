@@ -80,14 +80,22 @@ void loop() {
   DeviceMode mode = DeviceStateManager_getMode();
 
   if (mode == MODE_WORKOUT) {
-    // Workout: chỉ gửi vitals mỗi 1 giây (không gửi raw PPG vì tín hiệu nhiễu khi vận động)
+    // Workout: gom phát vitals (BPM + Pedometer Steps) mỗi 3 giây (Batching tiết kiệm pin)
     static unsigned long lastVitalsSend = 0;
-    if (millis() - lastVitalsSend >= 1000 && BLEManager_isConnected()) {
+    if (millis() - lastVitalsSend >= 3000) {
       lastVitalsSend = millis();
-      char buf[64];
-      size_t len = (size_t)snprintf(buf, sizeof(buf), "W:%lu,%u,%u\n",
-                                    millis(), PPGManager_getBPM(), PPGManager_getSpO2());
-      BLEManager_notifyReport(buf, len);
+      uint8_t bpm = PPGManager_getBPM();
+      uint32_t steps = AccelManager_getStepCount();
+
+      if (BLEManager_isConnected()) {
+        char buf[64];
+        size_t len = (size_t)snprintf(buf, sizeof(buf), "W:%lu,%u,%lu\n",
+                                      (unsigned long)millis(), (unsigned int)bpm, (unsigned long)steps);
+        BLEManager_notifyReport(buf, len);
+      } else {
+        // Ghi đệm Ring Buffer dữ liệu offline khi bị ngắt kết nối BLE
+        BLEManager_pushOfflineSample(bpm, steps);
+      }
     }
     // Drain PPG packet buffer để tránh tràn bộ nhớ (không gửi raw PPG ở workout)
     { char drain[512]; size_t dl = 0; PPGManager_popPacket(drain, sizeof(drain), &dl); }

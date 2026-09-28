@@ -81,8 +81,54 @@ bool AccelManager_popMotionEvent() {
   return motionEvent;
 }
 
+static uint32_t stepCount = 0;
+static unsigned long lastStepTime = 0;
+static float prevAccelMag = 9.81f;
+
+uint32_t AccelManager_getStepCount() {
+    return stepCount;
+}
+
+void AccelManager_resetStepCount() {
+    stepCount = 0;
+    lastStepTime = 0;
+}
+
+void AccelManager_updatePedometer() {
+    if (!mpuReady) return;
+
+    static unsigned long lastSampleTime = 0;
+    unsigned long now = millis();
+
+    // Lấy mẫu gia tốc mỗi 40ms (25Hz) cho thuật toán Pedometer Peak Detection
+    if (now - lastSampleTime < 40) return;
+    lastSampleTime = now;
+
+    sensors_event_t a, g, temp;
+    mpu.getEvent(&a, &g, &temp);
+
+    // Tính độ lớn gia tốc tổng hợp A = sqrt(ax^2 + ay^2 + az^2)
+    float mag = sqrt(a.acceleration.x * a.acceleration.x +
+                     a.acceleration.y * a.acceleration.y +
+                     a.acceleration.z * a.acceleration.z);
+
+    // Peak detection: Ngưỡng phát hiện bước chân > 12.2 m/s² (tương đương chênh > 2.4 m/s² so với trọng lực 9.8m/s²)
+    // Cửa sổ thời gian giữa 2 bước hợp lệ: 280ms đến 1200ms
+    if (mag > 12.2f && prevAccelMag <= 12.2f) {
+        if (now - lastStepTime >= 280 && now - lastStepTime <= 1200) {
+            stepCount++;
+            lastStepTime = now;
+        } else if (lastStepTime == 0) {
+            stepCount++;
+            lastStepTime = now;
+        }
+    }
+    prevAccelMag = mag;
+}
+
 void AccelManager_process() {
-  if (!mpuReady) return;
+    if (!mpuReady) return;
+    AccelManager_updatePedometer();
 }
 
 void AccelManager_printDebug() {
@@ -96,8 +142,8 @@ void AccelManager_printDebug() {
     Serial.print(millis());
     Serial.print("] [ACCEL-DBG] isMoving=");
     Serial.print(isMoving ? "1" : "0");
-    Serial.print(" | isrCount=");
-    Serial.print((uint32_t)motionIsrCount);
+    Serial.print(" | steps=");
+    Serial.print(stepCount);
     Serial.print(" | motionStatus=");
     Serial.println(motionStatus);
   }

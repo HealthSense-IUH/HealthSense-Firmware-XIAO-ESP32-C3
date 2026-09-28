@@ -35,6 +35,10 @@ static unsigned long spo2Sum = 0;
 static unsigned long validSampleCount = 0;
 static unsigned long lastSampleAccumTime = 0;
 
+// Quản lý thời gian phục hồi tim mạch sau tập (10 phút = 600,000 ms)
+static unsigned long lastWorkoutEndTime = 0;
+const unsigned long WORKOUT_COOLDOWN_MS = 600000UL;
+
 static void enterMode(DeviceMode mode);
 static void exitMode(DeviceMode mode);
 static void DeviceStateManager_requestMode(DeviceMode newMode);
@@ -44,8 +48,20 @@ static void DeviceStateManager_requestMode(DeviceMode newMode);
 static void onBLECommand(const char* cmd) {
     if (strcmp(cmd, "CMD:START_MEASURE") == 0) {
         DeviceStateManager_onEvent(EVT_BLE_START_MEASURE);
-    } else if (strcmp(cmd, "CMD:START_WORKOUT") == 0) {
+    } else if (strcmp(cmd, "CMD:START_WORKOUT") == 0 || strcmp(cmd, "CMD:WORKOUT_START") == 0) {
+        lastWorkoutEndTime = 0; // Reset bộ đếm phục hồi tim khi bài tập mới bắt đầu
         DeviceStateManager_onEvent(EVT_BLE_START_WORKOUT);
+    } else if (strcmp(cmd, "CMD:WORKOUT_PAUSE") == 0) {
+        Serial.println("[WORKOUT] Tạm dừng đo nhịp tim & đếm bước");
+        sendBLECommand("ACK:WORKOUT_PAUSE\n");
+    } else if (strcmp(cmd, "CMD:WORKOUT_RESUME") == 0) {
+        Serial.println("[WORKOUT] Tiếp tục đo nhịp tim");
+        sendBLECommand("ACK:WORKOUT_RESUME\n");
+    } else if (strcmp(cmd, "CMD:WORKOUT_STOP") == 0) {
+        Serial.println("[WORKOUT] Kết thúc phiên tập luyện, bắt đầu 10 phút hồi phục tim tĩnh");
+        lastWorkoutEndTime = millis(); // Bắt đầu đếm 10 phút cooldown
+        sendBLECommand("ACK:WORKOUT_STOP\n");
+        DeviceStateManager_requestMode(MODE_IDLE);
     } else if (strcmp(cmd, "CMD:START_SCREENING") == 0) {
         DeviceStateManager_onEvent(EVT_BLE_START_SCREENING);
     } else if (strcmp(cmd, "CMD:IDLE") == 0) {
@@ -192,6 +208,16 @@ void DeviceStateManager_onEvent(DeviceEvent event) {
 
         case EVT_BLE_START_SCREENING:
             Serial.println("event BLE_START_SCREENING");
+            if (currentMode == MODE_WORKOUT) {
+                Serial.println("[WARN] Từ chối đo AFib Screening do đang trong MODE_WORKOUT");
+                sendBLECommand("ERR:WORKOUT_IN_PROGRESS\n");
+                break;
+            }
+            if (lastWorkoutEndTime > 0 && (millis() - lastWorkoutEndTime < WORKOUT_COOLDOWN_MS)) {
+                Serial.println("[WARN] Từ chối đo AFib Screening do đang trong 10 phút hồi phục tim sau tập");
+                sendBLECommand("ERR:WORKOUT_COOLDOWN\n");
+                break;
+            }
             sendBLECommand("CMD:START_SCREENING\n");
             if (currentMode == MODE_SCREENING) {
                 // Ép khởi động lại chu kỳ nếu đang ở trong chế độ chờ/ngủ của Screening
@@ -213,18 +239,23 @@ void DeviceStateManager_loop() {
     }
 
     if (currentMode == MODE_IDLE) {
-        if (millis() - lastWearCheck >= 3000) {
-            lastWearCheck = millis();
+        // Nếu vừa tập xong và đang trong 10 phút hồi phục tim -> KHÔNG tự động kích hoạt MODE_SCREENING
+        if (lastWorkoutEndTime > 0 && (millis() - lastWorkoutEndTime < WORKOUT_COOLDOWN_MS)) {
+            PPGManager_shutDown();
+        } else {
+            if (millis() - lastWearCheck >= 3000) {
+                lastWearCheck = millis();
 
-            PPGManager_wakeUp();
-            delay(50);
+                PPGManager_wakeUp();
+                delay(50);
 
-            long testIR = PPGManager_readIR();
-            if (testIR > 50000) {
-                Serial.println("[WEAR] Kich hoat do nhip tim!");
-                DeviceStateManager_requestMode(MODE_SCREENING);
-            } else {
-                PPGManager_shutDown();
+                long testIR = PPGManager_readIR();
+                if (testIR > 50000) {
+                    Serial.println("[WEAR] Kich hoat do nhip tim!");
+                    DeviceStateManager_requestMode(MODE_SCREENING);
+                } else {
+                    PPGManager_shutDown();
+                }
             }
         }
     }

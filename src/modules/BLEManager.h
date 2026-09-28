@@ -20,4 +20,8 @@ void BLEManager_setCommandCallback(void (*callback)(const char* cmd));
 uint8_t BLEManager_readBatteryLevel();
 void BLEManager_updateBatteryLevel();
 
+// Bộ đệm Ring Buffer dữ liệu Offline khi ngắt kết nối BLE
+void BLEManager_pushOfflineSample(uint8_t bpm, uint32_t steps);
+void BLEManager_flushOfflineBuffer();
+
 #endif
