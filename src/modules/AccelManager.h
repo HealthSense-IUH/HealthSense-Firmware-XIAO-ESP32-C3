@@ -11,4 +11,9 @@ void AccelManager_process();
 void AccelManager_printDebug();
 void AccelManager_setMotionThreshold(uint8_t threshold);
 
+// Pedometer Step Counter functions
+uint32_t AccelManager_getStepCount();
+void AccelManager_resetStepCount();
+void AccelManager_updatePedometer();
+
 #endif
