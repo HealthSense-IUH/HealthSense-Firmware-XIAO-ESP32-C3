@@ -3,8 +3,8 @@
 #include <heartRate.h>
 #include <Arduino.h>
 #include "AccelManager.h"
-#include "BleProtocol.h"
-#include "../config.h"
+#include "config/BleProtocol.h"
+#include "config/config.h"
 
 static MAX30105 particleSensor;
 static volatile bool dataReady = false;
@@ -46,7 +46,7 @@ struct Median3 {
 static Median3 bpmFilter;
 static Median3 spo2Filter;
 
-void IRAM_ATTR PPGManager_handleInterrupt() {
+static void IRAM_ATTR onDataReady() {
   dataReady = true;
 }
 
@@ -75,7 +75,7 @@ bool PPGManager_begin(uint8_t interruptPin) {
   configureFullPower();
 
   pinMode(interruptPin, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(interruptPin), PPGManager_handleInterrupt, FALLING);
+  attachInterrupt(digitalPinToInterrupt(interruptPin), onDataReady, FALLING);
   particleSensor.enableDATARDY();
 
   delay(10);

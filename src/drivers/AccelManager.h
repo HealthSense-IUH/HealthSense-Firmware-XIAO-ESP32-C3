@@ -5,7 +5,6 @@
 
 // Cảm biến gia tốc MPU6050: ngắt vung tay (motion) và đếm bước khi tập
 bool AccelManager_begin(uint8_t intPin);
-bool AccelManager_isReady();
 bool AccelManager_isMoving();
 // true một lần cho mỗi ngắt chuyển động (đồng thời nhả chân INT đang chốt)
 bool AccelManager_popMotionEvent();
@@ -14,9 +13,7 @@ void AccelManager_process();
 void AccelManager_printDebug();
 void AccelManager_setMotionThreshold(uint8_t threshold);
 
-// Đếm bước (peak detection)
+// Số bước đếm được từ lúc bật máy (peak detection)
 uint32_t AccelManager_getStepCount();
-void AccelManager_resetStepCount();
-void AccelManager_updatePedometer();
 
 #endif

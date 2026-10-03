@@ -16,13 +16,11 @@ void BLEManager_notifyReport(const char* data, size_t len);
 // Sự kiện CMD:/ACK:/ERR: lên điện thoại (characteristic DATA), bỏ qua khi chưa kết nối
 void BLEManager_sendEvent(const char* message);
 void BLEManager_startAdvertising();
-void BLEManager_stopAdvertising();
 
 // Đăng ký hàm xử lý lệnh nhận từ điện thoại qua BLE Write. Signature: void handler(const char* cmd)
 void BLEManager_setCommandCallback(void (*callback)(const char* cmd));
 
-// Mức pin (Battery Service 0x180F)
-uint8_t BLEManager_readBatteryLevel();
+// Đọc mức pin và cập nhật Battery Service (0x180F)
 void BLEManager_updateBatteryLevel();
 
 // Ghi đệm mẫu tập luyện khi mất kết nối BLE

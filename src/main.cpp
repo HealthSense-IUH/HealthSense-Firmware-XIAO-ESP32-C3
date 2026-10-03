@@ -1,13 +1,13 @@
 // HealthSense firmware (XIAO ESP32-C3): main chỉ khởi tạo module và điều phối luồng dữ liệu theo chế độ.
-// Logic chế độ / sàng lọc AFib nằm ở DeviceStateManager; giao thức BLE ở BleProtocol.h; chân và ngưỡng ở config.h.
+// Tầng: config/ (chân, ngưỡng, giao thức BLE) <- drivers/ (cảm biến, LED) <- comm/ (BLE) <- app/ (chế độ, sàng lọc AFib).
 #include <Arduino.h>
-#include "config.h"
-#include "modules/BLEManager.h"
-#include "modules/BleProtocol.h"
-#include "modules/PPGManager.h"
-#include "modules/AccelManager.h"
-#include "modules/DisplayPower.h"
-#include "modules/DeviceStateManager.h"
+#include "config/config.h"
+#include "config/BleProtocol.h"
+#include "drivers/AccelManager.h"
+#include "drivers/DisplayPower.h"
+#include "drivers/PPGManager.h"
+#include "comm/BLEManager.h"
+#include "app/DeviceStateManager.h"
 
 static void goToDeepSleep() {
   esp_deep_sleep_enable_gpio_wakeup(1ULL << BUTTON_PIN, ESP_GPIO_WAKEUP_GPIO_LOW);

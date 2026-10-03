@@ -1,16 +1,14 @@
 #include "BLEManager.h"
-#include "BleProtocol.h"
-#include "../config.h"
+#include "config/BleProtocol.h"
+#include "config/config.h"
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include <esp_mac.h>
 
-static BLEServer* pServer = nullptr;
 static BLECharacteristic* pCharacteristic = nullptr;        // NOTIFY: PPG thô + sự kiện
 static BLECharacteristic* pReportCharacteristic = nullptr;  // NOTIFY: báo cáo vitals, dữ liệu offline
-static BLECharacteristic* pWriteCharacteristic = nullptr;   // WRITE: lệnh từ điện thoại
 static BLECharacteristic* pBatteryCharacteristic = nullptr; // READ | NOTIFY: mức pin (0x2A19)
 
 // Đổi trong callback của BLE stack (task khác) nên phải volatile
@@ -22,7 +20,7 @@ static void (*commandCallback)(const char* cmd) = nullptr;
 
 // ---- Pin ----
 
-uint8_t BLEManager_readBatteryLevel() {
+static uint8_t readBatteryLevel() {
   // Cầu phân áp 2 x 100K: điện áp pin = 2 x điện áp tại chân ADC
   uint32_t batteryMilliVolts = analogReadMilliVolts(BATTERY_ADC_PIN) * 2;
   // Do suy hao mạch / sai số trở, pin đầy đo được ~4100mV
@@ -33,7 +31,7 @@ uint8_t BLEManager_readBatteryLevel() {
 
 void BLEManager_updateBatteryLevel() {
   if (pBatteryCharacteristic == nullptr) return;
-  uint8_t level = BLEManager_readBatteryLevel();
+  uint8_t level = readBatteryLevel();
   pBatteryCharacteristic->setValue(&level, 1);
   if (deviceConnected) pBatteryCharacteristic->notify();
 }
@@ -135,7 +133,7 @@ void BLEManager_begin() {
   BLEDevice::init(deviceName);
   BLEDevice::setMTU(512);
 
-  pServer = BLEDevice::createServer();
+  BLEServer* pServer = BLEDevice::createServer();
   pServer->setCallbacks(new ServerCallbacks());
 
   BLEService* pService = pServer->createService(BLE_SERVICE_UUID);
@@ -143,7 +141,7 @@ void BLEManager_begin() {
   pCharacteristic = pService->createCharacteristic(BLE_DATA_CHAR_UUID, BLECharacteristic::PROPERTY_NOTIFY);
   pCharacteristic->addDescriptor(new BLE2902());
 
-  pWriteCharacteristic = pService->createCharacteristic(
+  BLECharacteristic* pWriteCharacteristic = pService->createCharacteristic(
       BLE_COMMAND_CHAR_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
   pWriteCharacteristic->setCallbacks(new WriteCallbacks());
 
@@ -157,7 +155,7 @@ void BLEManager_begin() {
   pBatteryCharacteristic = pBatteryService->createCharacteristic(
       BLEUUID((uint16_t)BLE_BATTERY_LEVEL_UUID), BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
   pBatteryCharacteristic->addDescriptor(new BLE2902());
-  uint8_t initBatteryLevel = BLEManager_readBatteryLevel();
+  uint8_t initBatteryLevel = readBatteryLevel();
   pBatteryCharacteristic->setValue(&initBatteryLevel, 1);
   pBatteryService->start();
 
@@ -196,10 +194,6 @@ void BLEManager_sendEvent(const char* message) {
 
 void BLEManager_startAdvertising() {
   BLEDevice::startAdvertising();
-}
-
-void BLEManager_stopAdvertising() {
-  BLEDevice::getAdvertising()->stop();
 }
 
 void BLEManager_setCommandCallback(void (*callback)(const char* cmd)) {

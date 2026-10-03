@@ -19,18 +19,23 @@
 - Toàn bộ chân và ngưỡng khai báo ở `src/config.h`.
 
 ### Cấu trúc dự án
+Chia theo tầng, tầng trên chỉ gọi tầng dưới (app -> comm -> drivers -> config):
 ```
 src/
-  main.cpp                 Khởi tạo module, vòng loop điều phối luồng dữ liệu theo chế độ
-  config.h                 Chân kết nối, thời gian, ngưỡng, cờ log Serial
-  modules/
-    DeviceStateManager     Máy trạng thái: chế độ, sự kiện, chu kỳ sàng lọc AFib 10 phút
-    PPGManager             MAX30102: đọc FIFO, tính BPM / SpO2, gom gói PPG, phát hiện tháo tay
-    AccelManager           MPU6050: ngắt vung tay, đếm bước
-    BLEManager             BLE GATT: gửi dữ liệu, nhận lệnh, mức pin, bộ đệm offline
-    BleProtocol.h          Giao thức với app: UUID, lệnh, định dạng gói
-    DisplayPower           LED NeoPixel và nguồn MPU6050
-scripts/log_to_csv.py      Ghi dòng CSV từ Serial ra data/*.csv (mỗi lần đo một file)
+  main.cpp                   Khởi tạo, vòng loop điều phối luồng dữ liệu theo chế độ
+  config/
+    config.h                 Chân kết nối, thời gian, ngưỡng, cờ log Serial
+    BleProtocol.h            Giao thức với app: UUID, lệnh, định dạng gói
+  drivers/                   Phần cứng
+    PPGManager               MAX30102: đọc FIFO, BPM / SpO2, gói PPG, phát hiện tháo tay
+    AccelManager             MPU6050: ngắt vung tay, đếm bước
+    DisplayPower             LED NeoPixel và nguồn MPU6050
+  comm/
+    BLEManager               BLE GATT: gửi dữ liệu, nhận lệnh, mức pin, bộ đệm offline
+  app/                       Logic ứng dụng
+    DeviceStateManager       Máy trạng thái: chế độ, sự kiện từ nút / cảm biến / app
+    AfibScreening            Chu kỳ sàng lọc AFib 10 phút (pha 1 đo 60s, pha 2-4 đo 30s)
+scripts/log_to_csv.py        Ghi dòng CSV từ Serial ra data/*.csv (mỗi lần đo một file)
 ```
 
 ### Kiến trúc
@@ -39,7 +44,7 @@ Vòng `loop()` (không dùng RTOS task riêng, mọi việc chạy tuần tự, 
 2. `AccelManager`: đếm bước 25Hz; ngắt vung tay thành sự kiện `EVT_MOTION`.
 3. `PPGManager`: có ngắt dữ liệu thì đọc FIFO, cập nhật BPM / SpO2, gom gói 10 mẫu; IR thấp liên tục 2 giây thành `EVT_NOT_WEARING`.
 4. Luồng dữ liệu theo chế độ: WORKOUT gửi `W:` mỗi 3 giây (mất kết nối thì ghi đệm); MEASURE / SCREENING gửi gói PPG thô.
-5. `DeviceStateManager_loop`: đổi chế độ (exit -> enter), dò đeo tay khi IDLE, chạy chu kỳ sàng lọc.
+5. `DeviceStateManager_loop`: đổi chế độ (exit -> enter), dò đeo tay khi IDLE, chạy chu kỳ sàng lọc (`AfibScreening`).
 6. `BLEManager_loop`: gửi bù dữ liệu tập luyện đã ghi đệm sau khi kết nối lại.
 7. Cập nhật mức pin mỗi 30 giây.
 
@@ -80,13 +85,12 @@ BLE (chi tiết trong `BleProtocol.h`): một service với 3 characteristic DAT
 - All pins and thresholds live in `src/config.h`.
 
 ### Project Structure
-- `main.cpp`: initializes the modules and routes data per device mode each loop.
-- `config.h`: pins, timings, thresholds and Serial log switches.
-- `DeviceStateManager`: state machine (modes, events, 10-minute AFib screening cycle).
-- `PPGManager`: MAX30102 FIFO reading, BPM / SpO2, PPG packets, removal detection.
-- `AccelManager`: MPU6050 motion interrupt and step counting.
-- `BLEManager` + `BleProtocol.h`: BLE GATT service, commands, battery level, offline buffer; the protocol shared with the phone app.
-- `DisplayPower`: NeoPixel LED and MPU6050 power.
+Layered; each layer only calls the ones below it (app -> comm -> drivers -> config):
+- `src/main.cpp`: initializes the modules and routes data per device mode each loop.
+- `src/config/`: `config.h` (pins, timings, thresholds, Serial log switches) and `BleProtocol.h` (the protocol shared with the phone app).
+- `src/drivers/`: `PPGManager` (MAX30102), `AccelManager` (MPU6050), `DisplayPower` (NeoPixel LED, MPU6050 power).
+- `src/comm/`: `BLEManager` (GATT service, commands, battery level, offline buffer).
+- `src/app/`: `DeviceStateManager` (modes and events) and `AfibScreening` (10-minute AFib screening cycle).
 
 See the Vietnamese "Kiến trúc" section above for the loop, mode diagram and BLE layout.
 

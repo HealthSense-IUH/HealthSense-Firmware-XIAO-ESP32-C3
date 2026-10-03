@@ -1,12 +1,9 @@
 #pragma once
 
-#include <Arduino.h>
-#include "BLEManager.h"
-#include "PPGManager.h"
-#include "AccelManager.h"
-#include "DisplayPower.h"
+#include <stdint.h>
 
-// Máy trạng thái của thiết bị: chế độ hiện tại, sự kiện từ nút / cảm biến / điện thoại, chu kỳ sàng lọc AFib
+// Máy trạng thái của thiết bị: chế độ hiện tại và sự kiện từ nút / cảm biến / điện thoại.
+// Chu kỳ sàng lọc AFib của MODE_SCREENING nằm ở AfibScreening.
 enum DeviceMode {
   MODE_IDLE,       // Chờ: cảm biến tắt, dò đeo tay mỗi 3 giây, quảng bá BLE
   MODE_MEASURE,    // Đo chủ động theo lệnh điện thoại: gửi PPG thô

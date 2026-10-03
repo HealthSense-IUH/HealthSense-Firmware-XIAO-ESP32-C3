@@ -13,7 +13,6 @@ bool PPGManager_popPacket(char* outBuf, size_t bufSize, size_t* outLen);
 void PPGManager_discardPacket();
 uint8_t PPGManager_getBPM();
 uint8_t PPGManager_getSpO2();
-void PPGManager_handleInterrupt();
 void PPGManager_wakeUp();
 void PPGManager_shutDown();
 bool PPGManager_popNoFingerEvent();

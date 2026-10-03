@@ -2,7 +2,7 @@
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <Arduino.h>
-#include "../config.h"
+#include "config/config.h"
 
 static Adafruit_MPU6050 mpu;
 static bool mpuReady = false;
@@ -55,7 +55,6 @@ bool AccelManager_begin(uint8_t intPin) {
   return true;
 }
 
-bool AccelManager_isReady() { return mpuReady; }
 bool AccelManager_isMoving() { return isMoving; }
 
 bool AccelManager_popMotionEvent() {
@@ -75,12 +74,8 @@ uint32_t AccelManager_getStepCount() {
   return stepCount;
 }
 
-void AccelManager_resetStepCount() {
-  stepCount = 0;
-  lastStepTime = 0;
-}
-
-void AccelManager_updatePedometer() {
+/** Lấy mẫu gia tốc 25Hz và đếm bước. */
+static void updatePedometer() {
   if (!mpuReady) return;
 
   static unsigned long lastSampleTime = 0;
@@ -106,7 +101,7 @@ void AccelManager_updatePedometer() {
 }
 
 void AccelManager_process() {
-  AccelManager_updatePedometer();
+  updatePedometer();
 }
 
 void AccelManager_printDebug() {
