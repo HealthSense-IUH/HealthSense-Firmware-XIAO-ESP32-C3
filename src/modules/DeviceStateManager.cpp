@@ -1,571 +1,500 @@
 #include "DeviceStateManager.h"
+#include "BleProtocol.h"
+#include "../config.h"
 
 static DeviceMode currentMode = MODE_IDLE;
 static DeviceMode pendingMode = MODE_IDLE;
-static unsigned long lastModeChangeTime = 0;
-static unsigned long lastWearCheck = 0;
-static unsigned long screeningStartTime = 0;
-static unsigned long screeningEndTime = 0;
-static unsigned long ledWakeTime = 0;
-static bool isLEDOn = false;
 static uint8_t wakeButtonPin;
-static uint8_t accelVddPin_stored;
+static uint8_t accelVddPin;
 
-static bool isWearing = false;
-static long btnPressTime = 0;
+// Nút bấm và LED
+static unsigned long btnPressTime = 0;
 static bool isBtnPressed = false;
 static bool isLongPressHandled = false;
-static bool isScreening = false;
+static unsigned long ledWakeTime = 0;
+static bool isLEDOn = false;
 
-// Screening cycle management (10-minute cycle with 2 phases)
+// Dò đeo tay khi IDLE
+static unsigned long lastWearCheck = 0;
+
+// Hồi phục tim sau tập: trong 10 phút sau WORKOUT_STOP không tự đo / nhận lệnh sàng lọc AFib
+static unsigned long lastWorkoutEndTime = 0;
+
+/*
+ * Sàng lọc AFib: chu kỳ 10 phút, mốc tính từ đầu chu kỳ.
+ *   Pha 1 (0s):     đo 60s đầy đủ (BPM + SpO2) -> báo R1
+ *   Pha 2 (150s), Pha 3 (300s), Pha 4 (450s): đo 30s (chủ yếu BPM, LED đỏ gần tắt) -> báo R2
+ *   600s:           bắt đầu chu kỳ mới
+ * Giữa các pha cảm biến tắt để tiết kiệm pin. Rung tay trong pha 1 thì ngủ 30s rồi đo lại (tối đa 3 lần);
+ * hỏng cả 3 lần hoặc không còn đủ 60s trước mốc 150s thì bỏ SpO2 của chu kỳ, các pha sau đo cả SpO2.
+ * Giá trị enum giữ như bản cũ: pha đo phụ là số lẻ, pha chờ trước nó là số chẵn liền trước.
+ */
+enum ScreeningPhase : uint8_t {
+  PHASE_NONE = 0,
+  PHASE1_MEASURE = 1,
+  WAIT_PHASE2 = 2,
+  PHASE2_MEASURE = 3,
+  WAIT_PHASE3 = 4,
+  PHASE3_MEASURE = 5,
+  WAIT_PHASE4 = 6,
+  PHASE4_MEASURE = 7,
+  WAIT_CYCLE_END = 8,
+  PHASE1_RETRY_SLEEP = 9,
+};
+
+#define PHASE1_DURATION_MS      60000UL
+#define SUB_PHASE_DURATION_MS   30000UL
+#define RETRY_SLEEP_MS          30000UL
+#define MAX_PHASE1_ATTEMPTS     3
+#define PHASE2_START_MS         150000UL  // 2,5 phút
+#define CYCLE_MS                600000UL  // 10 phút
+#define SALVAGE_MIN_SAMPLES     10        // Rung tay giữa pha 1: vẫn báo R1 nếu đã có hơn 10 mẫu
+#define REPORT_MIN_BPM          40
+
+static ScreeningPhase screeningPhase = PHASE_NONE;
 static unsigned long screeningCycleStart = 0;
-// 0: idle, 1: Phase 1 (1 min measure), 2: Phase 1 sleep dynamic, 3: Phase 2 (30s measure), 4: Phase 2 sleep dynamic, 5: Phase 1 micro-retry wait (30s)
 static uint8_t screeningRetryCount = 0;
-static uint8_t screeningPhase = 0;
 static unsigned long phaseStartTime = 0;
-static unsigned long retrySleepStart = 0;
 static unsigned long phaseSleepStart = 0;
 static unsigned long phaseSleepDuration = 0;
 static bool isSpo2Missed = false;
 static uint8_t phase1AvgSpO2 = 0;
 
-// Accumulators for averaging vitals
+// Cộng dồn BPM / SpO2 mỗi giây để lấy trung bình của pha
 static unsigned long bpmSum = 0;
 static unsigned long spo2Sum = 0;
 static unsigned long validSampleCount = 0;
 static unsigned long lastSampleAccumTime = 0;
 
-// Quản lý thời gian phục hồi tim mạch sau tập (10 phút = 600,000 ms)
-static unsigned long lastWorkoutEndTime = 0;
-const unsigned long WORKOUT_COOLDOWN_MS = 600000UL;
-
 static void enterMode(DeviceMode mode);
 static void exitMode(DeviceMode mode);
-static void DeviceStateManager_requestMode(DeviceMode newMode);
+static void requestMode(DeviceMode newMode);
 
-// Hàm xử lý lệnh nhận từ điện thoại qua BLE Write
-// Được đăng ký vào BLEManager trong begin()
+// ---- Lệnh từ điện thoại ----
+
 static void onBLECommand(const char* cmd) {
-    if (strcmp(cmd, "CMD:START_MEASURE") == 0) {
-        DeviceStateManager_onEvent(EVT_BLE_START_MEASURE);
-    } else if (strcmp(cmd, "CMD:START_WORKOUT") == 0 || strcmp(cmd, "CMD:WORKOUT_START") == 0) {
-        lastWorkoutEndTime = 0; // Reset bộ đếm phục hồi tim khi bài tập mới bắt đầu
-        DeviceStateManager_onEvent(EVT_BLE_START_WORKOUT);
-    } else if (strcmp(cmd, "CMD:WORKOUT_PAUSE") == 0) {
-        Serial.println("[WORKOUT] Tạm dừng đo nhịp tim & đếm bước");
-        sendBLECommand("ACK:WORKOUT_PAUSE\n");
-    } else if (strcmp(cmd, "CMD:WORKOUT_RESUME") == 0) {
-        Serial.println("[WORKOUT] Tiếp tục đo nhịp tim");
-        sendBLECommand("ACK:WORKOUT_RESUME\n");
-    } else if (strcmp(cmd, "CMD:WORKOUT_STOP") == 0) {
-        Serial.println("[WORKOUT] Kết thúc phiên tập luyện, bắt đầu 10 phút hồi phục tim tĩnh");
-        lastWorkoutEndTime = millis(); // Bắt đầu đếm 10 phút cooldown
-        sendBLECommand("ACK:WORKOUT_STOP\n");
-        DeviceStateManager_requestMode(MODE_IDLE);
-    } else if (strcmp(cmd, "CMD:START_SCREENING") == 0) {
-        DeviceStateManager_onEvent(EVT_BLE_START_SCREENING);
-    } else if (strcmp(cmd, "CMD:IDLE") == 0) {
-        DeviceStateManager_onEvent(EVT_NOT_WEARING); // Về IDLE
-    } else {
-        Serial.print("[BLE-RX] Lệnh không xác định: ");
-        Serial.println(cmd);
-    }
+  if (strcmp(cmd, CMD_START_MEASURE) == 0) {
+    DeviceStateManager_onEvent(EVT_BLE_START_MEASURE);
+  } else if (strcmp(cmd, CMD_START_WORKOUT) == 0 || strcmp(cmd, CMD_WORKOUT_START) == 0) {
+    lastWorkoutEndTime = 0;  // Bài tập mới: bỏ thời gian hồi phục của bài trước
+    DeviceStateManager_onEvent(EVT_BLE_START_WORKOUT);
+  } else if (strcmp(cmd, CMD_WORKOUT_PAUSE) == 0) {
+    Serial.println("[WORKOUT] Tạm dừng đo nhịp tim & đếm bước");
+    BLEManager_sendEvent(ACK_WORKOUT_PAUSE);
+  } else if (strcmp(cmd, CMD_WORKOUT_RESUME) == 0) {
+    Serial.println("[WORKOUT] Tiếp tục đo nhịp tim");
+    BLEManager_sendEvent(ACK_WORKOUT_RESUME);
+  } else if (strcmp(cmd, CMD_WORKOUT_STOP) == 0) {
+    Serial.println("[WORKOUT] Kết thúc phiên tập luyện, bắt đầu 10 phút hồi phục tim tĩnh");
+    lastWorkoutEndTime = millis();
+    BLEManager_sendEvent(ACK_WORKOUT_STOP);
+    requestMode(MODE_IDLE);
+  } else if (strcmp(cmd, CMD_START_SCREENING) == 0) {
+    DeviceStateManager_onEvent(EVT_BLE_START_SCREENING);
+  } else if (strcmp(cmd, CMD_IDLE) == 0) {
+    DeviceStateManager_onEvent(EVT_NOT_WEARING);  // Về IDLE
+  } else {
+    Serial.print("[BLE-RX] Lệnh không xác định: ");
+    Serial.println(cmd);
+  }
 }
 
-void DeviceStateManager_begin(uint8_t buttonPin, uint8_t accelVddPin) {
-    currentMode = MODE_TURN_ON;
-    pendingMode = MODE_TURN_ON;
-    lastModeChangeTime = millis();
-    lastWearCheck = 0;
-    screeningStartTime = 0;
-    screeningEndTime = 0;
-    ledWakeTime = 0;
-    isLEDOn = false;
-    btnPressTime = 0;
-    isBtnPressed = false;
-    isLongPressHandled = false;
-    isWearing = false;
-    isScreening = false;
-    wakeButtonPin = buttonPin;
-    accelVddPin_stored = accelVddPin;
-    // Đăng ký handler lệnh BLE Write
-    BLEManager_setCommandCallback(onBLECommand);
-    enterMode(MODE_TURN_ON);
+static bool inWorkoutCooldown() {
+  return lastWorkoutEndTime > 0 && (millis() - lastWorkoutEndTime < WORKOUT_COOLDOWN_MS);
+}
+
+// ---- Sàng lọc AFib ----
+
+static void resetAccumulator() {
+  bpmSum = 0;
+  spo2Sum = 0;
+  validSampleCount = 0;
+  lastSampleAccumTime = millis();
+}
+
+/** Bắt đầu một pha đo: xóa cộng dồn, bật cảm biến với cấu hình của pha. */
+static void startMeasurePhase(ScreeningPhase phase) {
+  screeningPhase = phase;
+  phaseStartTime = millis();
+  resetAccumulator();
+  PPGManager_wakeUp();
+  if (phase == PHASE1_MEASURE) PPGManager_setupPhase1();
+  else PPGManager_setupPhase2(!isSpo2Missed);  // Đã có SpO2 từ pha 1 thì chạy chế độ tiết kiệm pin
+}
+
+/** Chờ (cảm biến đã tắt) tới mốc offsetMs tính từ đầu chu kỳ. */
+static void sleepUntil(ScreeningPhase waitPhase, unsigned long offsetMs) {
+  screeningPhase = waitPhase;
+  phaseSleepStart = millis();
+  long remaining = (long)(screeningCycleStart + offsetMs) - (long)millis();
+  phaseSleepDuration = remaining > 0 ? remaining : 0;
+}
+
+static void startCycle() {
+  screeningCycleStart = millis();
+  screeningRetryCount = 0;
+  isSpo2Missed = false;
+  startMeasurePhase(PHASE1_MEASURE);
+}
+
+static void sendReport(const char* format, uint8_t bpm, uint8_t spo2) {
+  if (!BLEManager_isConnected()) return;
+  char report[32];
+  snprintf(report, sizeof(report), format, bpm, spo2);
+  BLEManager_notifyReport(report, strlen(report));
+}
+
+/** Cộng dồn mỗi giây. Pha 1 cần cả BPM và SpO2; pha phụ chỉ cần BPM (SpO2 chỉ cộng khi đã lỡ ở pha 1). */
+static void accumulateVitals(bool phase1) {
+  unsigned long now = millis();
+  if (now - lastSampleAccumTime < 1000) return;
+  lastSampleAccumTime = now;
+  uint8_t bpm = PPGManager_getBPM();
+  uint8_t spo2 = PPGManager_getSpO2();
+  if (phase1) {
+    if (bpm == 0 || spo2 == 0) return;
+    bpmSum += bpm;
+    spo2Sum += spo2;
+  } else {
+    if (bpm == 0) return;
+    bpmSum += bpm;
+    if (isSpo2Missed && spo2 > 0) spo2Sum += spo2;
+  }
+  validSampleCount++;
+}
+
+static uint8_t averageBPM() {
+  return validSampleCount > 0 ? bpmSum / validSampleCount : 0;
+}
+
+static uint8_t averageSpO2() {
+  return validSampleCount > 0 ? spo2Sum / validSampleCount : 0;
+}
+
+/** Rung tay giữa pha 1: tắt cảm biến, ngủ 30s rồi đo lại; quá 3 lần thì bỏ SpO2 và chờ pha 2. */
+static void onPhase1Motion() {
+  Serial.println("[SCREENING] Phát hiện chuyển động! Ngừng đo Pha 1 và thử lại chớp nhoáng...");
+
+  // Cứu dữ liệu: đã có hơn 10 mẫu hợp lệ trước khi rung tay thì vẫn báo R1
+  if (validSampleCount > SALVAGE_MIN_SAMPLES && BLEManager_isConnected()) {
+    uint8_t avgBPM = averageBPM();
+    uint8_t avgSpO2 = averageSpO2();
+    sendReport(FMT_REPORT_PHASE1, avgBPM, avgSpO2);
+    Serial.printf("[SCREENING] Đã vớt vát dữ liệu sinh hiệu trước khi hủy: %u BPM, %u%%\n", avgBPM, avgSpO2);
+  }
+
+  PPGManager_shutDown();
+  screeningRetryCount++;
+
+  if (screeningRetryCount < MAX_PHASE1_ATTEMPTS) {
+    screeningPhase = PHASE1_RETRY_SLEEP;
+    phaseSleepStart = millis();
+    Serial.printf("[SCREENING] Micro-Retry lần %u/%u. Ngủ đông 30 giây...\n", screeningRetryCount,
+                  MAX_PHASE1_ATTEMPTS);
+  } else {
+    isSpo2Missed = true;
+    Serial.println("[SCREENING] Thất bại 3 lần đo Pha 1. Bỏ lỡ SpO2. Nghỉ đến mốc 2.5 phút (Pha 2)...");
+    sleepUntil(WAIT_PHASE2, PHASE2_START_MS);
+  }
+}
+
+static void finishPhase1() {
+  PPGManager_shutDown();
+  uint8_t avgBPM = averageBPM();
+  uint8_t avgSpO2 = averageSpO2();
+  phase1AvgSpO2 = avgSpO2;  // Các pha phụ báo lại SpO2 này
+  isSpo2Missed = false;
+
+  Serial.printf("[SCREENING] Pha 1 thành công! Avg BPM: %u | Avg SpO2: %u\n", avgBPM, avgSpO2);
+  sendReport(FMT_REPORT_PHASE1, avgBPM, avgSpO2);
+
+  sleepUntil(WAIT_PHASE2, PHASE2_START_MS);
+  Serial.printf("[SCREENING] Ngủ động %lu giây để đến mốc 2.5 phút (Pha 2)...\n", phaseSleepDuration / 1000);
+}
+
+static void finishSubPhase() {
+  PPGManager_shutDown();
+  uint8_t avgBPM = averageBPM();
+  uint8_t avgSpO2 = isSpo2Missed ? averageSpO2() : 0;
+  uint8_t reportBPM = (avgBPM > REPORT_MIN_BPM && avgBPM < 255) ? avgBPM : 0;  // Ngoài khoảng là đo hỏng, báo 0
+  uint8_t reportSpO2 = isSpo2Missed ? avgSpO2 : phase1AvgSpO2;
+  uint8_t phaseNumber = (screeningPhase / 2) + 1;
+
+  Serial.printf("[SCREENING] Pha %u hoàn tất! Avg BPM: %u (Gửi: %u) | SpO2: %u\n", phaseNumber, avgBPM, reportBPM,
+                reportSpO2);
+  sendReport(FMT_REPORT_PHASE2, reportBPM, reportSpO2);
+
+  // Pha đo m -> chờ m+1 tới mốc kế tiếp (pha 2 -> 300s, pha 3 -> 450s, pha 4 -> hết chu kỳ 600s)
+  unsigned long targetMs = PHASE2_START_MS * phaseNumber;  // Mốc pha kế tiếp = 150s x số thứ tự pha vừa xong
+  ScreeningPhase waitPhase = static_cast<ScreeningPhase>(screeningPhase + 1);
+  sleepUntil(waitPhase, targetMs);
+  Serial.printf("[SCREENING] Ngủ động %lu giây để đến mốc %lus...\n", phaseSleepDuration / 1000, targetMs / 1000);
+}
+
+/** Hết 30s ngủ thử lại: còn đủ 60s trước mốc pha 2 thì đo lại pha 1, không thì bỏ SpO2 và chờ pha 2. */
+static void finishRetrySleep() {
+  long untilPhase2 = (long)(screeningCycleStart + PHASE2_START_MS) - (long)millis();
+  if (untilPhase2 < (long)PHASE1_DURATION_MS) {
+    Serial.println("[SCREENING] Thời gian còn lại < 60s, không đủ đo trọn vẹn Pha 1. Hủy đo Pha 1 và chuyển sang chờ Pha 2...");
+    isSpo2Missed = true;
+    sleepUntil(WAIT_PHASE2, PHASE2_START_MS);
+  } else {
+    Serial.println("[SCREENING] Hết 30 giây ngủ micro-retry. Thức dậy đo lại Pha 1...");
+    startMeasurePhase(PHASE1_MEASURE);
+  }
+}
+
+static void screeningLoop() {
+  unsigned long now = millis();
+  switch (screeningPhase) {
+    case PHASE1_MEASURE:
+      accumulateVitals(true);
+      if (now - phaseStartTime >= PHASE1_DURATION_MS) finishPhase1();
+      break;
+
+    case PHASE1_RETRY_SLEEP:
+      if (now - phaseSleepStart >= RETRY_SLEEP_MS) finishRetrySleep();
+      break;
+
+    case WAIT_PHASE2:
+    case WAIT_PHASE3:
+    case WAIT_PHASE4:
+      if (now - phaseSleepStart >= phaseSleepDuration) {
+        ScreeningPhase measurePhase = static_cast<ScreeningPhase>(screeningPhase + 1);
+        Serial.printf("[SCREENING] Thức dậy bắt đầu Pha đo thứ %u...\n", (measurePhase / 2) + 1);
+        startMeasurePhase(measurePhase);
+      }
+      break;
+
+    case PHASE2_MEASURE:
+    case PHASE3_MEASURE:
+    case PHASE4_MEASURE:
+      accumulateVitals(false);
+      if (now - phaseStartTime >= SUB_PHASE_DURATION_MS) finishSubPhase();
+      break;
+
+    case WAIT_CYCLE_END:
+      if (now - phaseSleepStart >= phaseSleepDuration) {
+        Serial.println("[SCREENING] Đã xong 10 phút chu kỳ. Bắt đầu chu kỳ 10 phút mới (Pha 1)...");
+        startCycle();
+      }
+      break;
+
+    case PHASE_NONE:
+      break;
+  }
+}
+
+/** IDLE: mỗi 3 giây bật cảm biến chốc lát; thấy đang đeo thì tự vào sàng lọc (trừ lúc hồi phục sau tập). */
+static void idleLoop() {
+  if (inWorkoutCooldown()) {
+    PPGManager_shutDown();
+    return;
+  }
+  if (millis() - lastWearCheck < WEAR_CHECK_INTERVAL_MS) return;
+  lastWearCheck = millis();
+
+  PPGManager_wakeUp();
+  delay(50);
+  if (PPGManager_readIR() > WEAR_IR_THRESHOLD) {
+    Serial.println("[WEAR] Kich hoat do nhip tim!");
+    requestMode(MODE_SCREENING);
+  } else {
+    PPGManager_shutDown();
+  }
+}
+
+// ---- API ----
+
+void DeviceStateManager_begin(uint8_t buttonPin, uint8_t accelVdd) {
+  currentMode = MODE_TURN_ON;
+  pendingMode = MODE_TURN_ON;
+  wakeButtonPin = buttonPin;
+  accelVddPin = accelVdd;
+  BLEManager_setCommandCallback(onBLECommand);
+  enterMode(MODE_TURN_ON);
 }
 
 void DeviceStateManager_handleButton() {
-    if (digitalRead(wakeButtonPin) == LOW) {
-        if (!isBtnPressed) {
-            isBtnPressed = true;
-            btnPressTime = millis();
-            isLongPressHandled = false;
-        } else if (!isLongPressHandled && (millis() - btnPressTime >= 4000)) {
-            isLongPressHandled = true;
-            DeviceStateManager_onEvent(EVT_BUTTON_LONG);
-        }
-    } else {
-        if (isBtnPressed) {
-            isBtnPressed = false;
-            if (!isLongPressHandled) {
-                DeviceStateManager_onEvent(EVT_BUTTON_SHORT);
-            }
-        }
+  if (digitalRead(wakeButtonPin) == LOW) {
+    if (!isBtnPressed) {
+      isBtnPressed = true;
+      btnPressTime = millis();
+      isLongPressHandled = false;
+    } else if (!isLongPressHandled && (millis() - btnPressTime >= LONG_PRESS_MS)) {
+      isLongPressHandled = true;
+      DeviceStateManager_onEvent(EVT_BUTTON_LONG);
     }
+  } else if (isBtnPressed) {
+    isBtnPressed = false;
+    if (!isLongPressHandled) DeviceStateManager_onEvent(EVT_BUTTON_SHORT);
+  }
 
-    if (isLEDOn && (millis() - ledWakeTime > 3000)) {
-        DisplayPower_showOff();
-        isLEDOn = false;
-    }
+  if (isLEDOn && (millis() - ledWakeTime > LED_TIMEOUT_MS)) {
+    DisplayPower_showOff();
+    isLEDOn = false;
+  }
+}
+
+static void flashLED() {
+  DisplayPower_showOn();
+  isLEDOn = true;
+  ledWakeTime = millis();
 }
 
 void DeviceStateManager_onEvent(DeviceEvent event) {
-    switch (event) {
-        case EVT_BUTTON_SHORT:
-            DisplayPower_showOn();
-            isLEDOn = true;
-            ledWakeTime = millis();
-            Serial.println("event BUTTON_SHORT, LED on");
-            break;
+  switch (event) {
+    case EVT_BUTTON_SHORT:
+      flashLED();
+      Serial.println("event BUTTON_SHORT, LED on");
+      break;
 
-        case EVT_BUTTON_LONG:
-            Serial.println("event BUTTON_LONG, device shutdown");
-            DeviceStateManager_requestMode(MODE_SHUTDOWN);
-            break;
+    case EVT_BUTTON_LONG:
+      Serial.println("event BUTTON_LONG, device shutdown");
+      requestMode(MODE_SHUTDOWN);
+      break;
 
-        case EVT_MOTION:
-            if (currentMode == MODE_MEASURE || currentMode == MODE_SCREENING) {
-                Serial.print("[");
-                Serial.print(millis());
-                Serial.println("] event MOTION, detected arm motion");
-                sendBLECommand("CMD:MOTION\n");
-                if (currentMode == MODE_SCREENING) {
-                    if (screeningPhase == 1) {
-                        Serial.println("[SCREENING] Phát hiện chuyển động! Ngừng đo Pha 1 và thử lại chớp nhoáng...");
-                        
-                        // Cứu vớt dữ liệu: Nếu đã thu thập được > 10 mẫu hợp lệ trước khi bị rung tay
-                        if (validSampleCount > 10) {
-                            uint8_t avgBPM = bpmSum / validSampleCount;
-                            uint8_t avgSpO2 = spo2Sum / validSampleCount;
-                            char report[32];
-                            snprintf(report, sizeof(report), "R1:%u,%u\n", avgBPM, avgSpO2);
-                            if (BLEManager_isConnected()) {
-                                BLEManager_notifyReport(report, strlen(report));
-                                Serial.print("[SCREENING] Đã vớt vát dữ liệu sinh hiệu trước khi hủy: ");
-                                Serial.print(avgBPM);
-                                Serial.print(" BPM, ");
-                                Serial.print(avgSpO2);
-                                Serial.println("%");
-                            }
-                        }
-                        
-                        PPGManager_shutDown(); // Tắt cảm biến ngay lập tức
-                        screeningRetryCount++;
-                        
-                        if (screeningRetryCount < 3) {
-                            // Đi ngủ chớp nhoáng 30 giây
-                            screeningPhase = 9;
-                            retrySleepStart = millis();
-                            Serial.print("[SCREENING] Micro-Retry lần ");
-                            Serial.print(screeningRetryCount);
-                            Serial.println("/3. Ngủ đông 30 giây...");
-                        } else {
-                            // Thất bại cả 3 lần
-                            isSpo2Missed = true;
-                            Serial.println("[SCREENING] Thất bại 3 lần đo Pha 1. Bỏ lỡ SpO2. Nghỉ đến phút thứ 5...");
-                            
-                            // Chuyển sang pha nghỉ chờ Pha 2
-                            screeningPhase = 2;
-                            phaseSleepStart = millis();
-                            // Tính toán thời gian ngủ động để đến mốc phút tiếp theo
-                            long targetTime = screeningCycleStart + 150 * 1000;
-                            long remaining = targetTime - millis();
-                            phaseSleepDuration = remaining > 0 ? remaining : 0;
-                        }
-                    }
-                } else {
-                    // Nếu đang trong chế độ Đo chủ động (MEASURE), 
-                    // chuyển thẳng về IDLE chờ người dùng thao tác lại
-                    DeviceStateManager_requestMode(MODE_IDLE);
-                }
-            }
-            break;
+    case EVT_MOTION:
+      if (currentMode != MODE_MEASURE && currentMode != MODE_SCREENING) break;
+      Serial.printf("[%lu] event MOTION, detected arm motion\n", (unsigned long)millis());
+      BLEManager_sendEvent(EVT_MSG_MOTION);
+      if (currentMode == MODE_MEASURE) {
+        // Đo chủ động bị rung tay: về IDLE chờ người dùng đo lại
+        requestMode(MODE_IDLE);
+      } else if (screeningPhase == PHASE1_MEASURE) {
+        onPhase1Motion();
+      }
+      break;
 
-        case EVT_NOT_WEARING:
-            Serial.println("event NOT_WEARING");
-            sendBLECommand("CMD:NOT_WEARING\n");
-            DeviceStateManager_requestMode(MODE_IDLE);
-            break;
+    case EVT_NOT_WEARING:
+      Serial.println("event NOT_WEARING");
+      BLEManager_sendEvent(EVT_MSG_NOT_WEARING);
+      requestMode(MODE_IDLE);
+      break;
 
-        case EVT_BLE_START_MEASURE:
-            Serial.println("event BLE_START_MEASURE");
-            DeviceStateManager_requestMode(MODE_MEASURE);
-            break;
+    case EVT_BLE_START_MEASURE:
+      Serial.println("event BLE_START_MEASURE");
+      requestMode(MODE_MEASURE);
+      break;
 
-        case EVT_BLE_START_WORKOUT:
-            Serial.println("event BLE_START_WORKOUT");
-            DeviceStateManager_requestMode(MODE_WORKOUT);
-            break;
+    case EVT_BLE_START_WORKOUT:
+      Serial.println("event BLE_START_WORKOUT");
+      requestMode(MODE_WORKOUT);
+      break;
 
-        case EVT_BLE_START_SCREENING:
-            Serial.println("event BLE_START_SCREENING");
-            if (currentMode == MODE_WORKOUT) {
-                Serial.println("[WARN] Từ chối đo AFib Screening do đang trong MODE_WORKOUT");
-                sendBLECommand("ERR:WORKOUT_IN_PROGRESS\n");
-                break;
-            }
-            if (lastWorkoutEndTime > 0 && (millis() - lastWorkoutEndTime < WORKOUT_COOLDOWN_MS)) {
-                Serial.println("[WARN] Từ chối đo AFib Screening do đang trong 10 phút hồi phục tim sau tập");
-                sendBLECommand("ERR:WORKOUT_COOLDOWN\n");
-                break;
-            }
-            sendBLECommand("CMD:START_SCREENING\n");
-            if (currentMode == MODE_SCREENING) {
-                // Ép khởi động lại chu kỳ nếu đang ở trong chế độ chờ/ngủ của Screening
-                exitMode(MODE_SCREENING);
-                enterMode(MODE_SCREENING);
-            } else {
-                DeviceStateManager_requestMode(MODE_SCREENING);
-            }
-            break;
-    }
+    case EVT_BLE_START_SCREENING:
+      Serial.println("event BLE_START_SCREENING");
+      if (currentMode == MODE_WORKOUT) {
+        Serial.println("[WARN] Từ chối đo AFib Screening do đang trong MODE_WORKOUT");
+        BLEManager_sendEvent(ERR_WORKOUT_IN_PROGRESS);
+        break;
+      }
+      if (inWorkoutCooldown()) {
+        Serial.println("[WARN] Từ chối đo AFib Screening do đang trong 10 phút hồi phục tim sau tập");
+        BLEManager_sendEvent(ERR_WORKOUT_COOLDOWN);
+        break;
+      }
+      BLEManager_sendEvent(EVT_MSG_START_SCREENING);
+      if (currentMode == MODE_SCREENING) {
+        // Đang sàng lọc (kể cả lúc chờ giữa các pha): bắt đầu lại chu kỳ ngay
+        exitMode(MODE_SCREENING);
+        enterMode(MODE_SCREENING);
+      } else {
+        requestMode(MODE_SCREENING);
+      }
+      break;
+  }
 }
 
 void DeviceStateManager_loop() {
-    if (pendingMode != currentMode) {
-        exitMode(currentMode);
-        currentMode = pendingMode;
-        enterMode(currentMode);
-        lastModeChangeTime = millis();
-    }
+  if (pendingMode != currentMode) {
+    exitMode(currentMode);
+    currentMode = pendingMode;
+    enterMode(currentMode);
+  }
 
-    if (currentMode == MODE_IDLE) {
-        // Nếu vừa tập xong và đang trong 10 phút hồi phục tim -> KHÔNG tự động kích hoạt MODE_SCREENING
-        if (lastWorkoutEndTime > 0 && (millis() - lastWorkoutEndTime < WORKOUT_COOLDOWN_MS)) {
-            PPGManager_shutDown();
-        } else {
-            if (millis() - lastWearCheck >= 3000) {
-                lastWearCheck = millis();
-
-                PPGManager_wakeUp();
-                delay(50);
-
-                long testIR = PPGManager_readIR();
-                if (testIR > 50000) {
-                    Serial.println("[WEAR] Kich hoat do nhip tim!");
-                    DeviceStateManager_requestMode(MODE_SCREENING);
-                } else {
-                    PPGManager_shutDown();
-                }
-            }
-        }
-    }
-
-    if (currentMode == MODE_SCREENING) {
-        unsigned long now = millis();
-        
-        if (screeningPhase == 1) {
-            // ĐANG ĐO PHA 1 (1 phút)
-            // Tích luỹ BPM/SpO2 mỗi 1 giây
-            if (now - lastSampleAccumTime >= 1000) {
-                lastSampleAccumTime = now;
-                uint8_t bpm = PPGManager_getBPM();
-                uint8_t spo2 = PPGManager_getSpO2();
-                if (bpm > 0 && spo2 > 0) { // Chỉ lấy dữ liệu khi hợp lệ
-                    bpmSum += bpm;
-                    spo2Sum += spo2;
-                    validSampleCount++;
-                }
-            }
-            
-            // Đã đo đủ 1 phút liên tục
-            if (now - phaseStartTime >= 60000UL) {
-                PPGManager_shutDown();
-                
-                uint8_t avgBPM = 0;
-                uint8_t avgSpO2 = 0;
-                if (validSampleCount > 0) {
-                    avgBPM = bpmSum / validSampleCount;
-                    avgSpO2 = spo2Sum / validSampleCount;
-                }
-                
-                phase1AvgSpO2 = avgSpO2; // Lưu lại để dùng ở Pha 2
-                isSpo2Missed = false;
-                
-                Serial.print("[SCREENING] Pha 1 thành công! Avg BPM: ");
-                Serial.print(avgBPM);
-                Serial.print(" | Avg SpO2: ");
-                Serial.println(avgSpO2);
-                
-                // Gửi qua Characteristic 2 (Báo cáo Pha 1 hoàn tất)
-                if (BLEManager_isConnected()) {
-                    char report[32];
-                    snprintf(report, sizeof(report), "R1:%u,%u\n", avgBPM, avgSpO2);
-                    BLEManager_notifyReport(report, strlen(report));
-                }
-                
-                // Chuyển sang pha nghỉ chờ Pha 2 (mốc 150s = 2.5 phút)
-                screeningPhase = 2;
-                phaseSleepStart = millis();
-                long targetTime = screeningCycleStart + 150 * 1000UL;
-                long remaining = targetTime - (long)millis();
-                phaseSleepDuration = remaining > 0 ? remaining : 0;
-                
-                Serial.print("[SCREENING] Ngủ động ");
-                Serial.print(phaseSleepDuration / 1000);
-                Serial.println(" giây để đến mốc 2.5 phút (Pha 2)...");
-            }
-        } 
-        else if (screeningPhase == 9) {
-            // ĐANG NGỦ MICRO-RETRY (30 giây)
-            if (now - retrySleepStart >= 30000UL) {
-                long timeRemainingForP1 = (long)(screeningCycleStart + 150000UL) - (long)now;
-                if (timeRemainingForP1 < 60000L) {
-                    // Thời gian còn lại đến mốc Pha 2 < 60s, không đủ để đo trọn vẹn 1 phút Pha 1
-                    Serial.println("[SCREENING] Thời gian còn lại < 60s, không đủ đo trọn vẹn Pha 1. Hủy đo Pha 1 và chuyển sang chờ Pha 2...");
-                    isSpo2Missed = true;
-                    screeningPhase = 2;
-                    phaseSleepStart = millis();
-                    phaseSleepDuration = timeRemainingForP1 > 0 ? timeRemainingForP1 : 0;
-                } else {
-                    // Đủ thời gian (>= 60s) -> Thức dậy đo lại Pha 1
-                    Serial.println("[SCREENING] Hết 30 giây ngủ micro-retry. Thức dậy đo lại Pha 1...");
-                    screeningPhase = 1;
-                    phaseStartTime = millis();
-                    bpmSum = 0;
-                    spo2Sum = 0;
-                    validSampleCount = 0;
-                    lastSampleAccumTime = millis();
-                    
-                    PPGManager_wakeUp();
-                    PPGManager_setupPhase1();
-                }
-            }
-        }
-        else if (screeningPhase == 2 || screeningPhase == 4 || screeningPhase == 6) {
-            // ĐANG NGHỈ CHỜ PHA TIẾP THEO
-            if (now - phaseSleepStart >= phaseSleepDuration) {
-                uint8_t nextMeasurePhase = 3;
-                if (screeningPhase == 2) nextMeasurePhase = 3;      // Pha 2 (mốc 2.5 min)
-                else if (screeningPhase == 4) nextMeasurePhase = 5; // Pha 3 (mốc 5.0 min)
-                else if (screeningPhase == 6) nextMeasurePhase = 7; // Pha 4 (mốc 7.5 min)
-
-                screeningPhase = nextMeasurePhase;
-                phaseStartTime = millis();
-                bpmSum = 0;
-                spo2Sum = 0;
-                validSampleCount = 0;
-                lastSampleAccumTime = millis();
-                
-                Serial.print("[SCREENING] Thức dậy bắt đầu Pha đo thứ ");
-                Serial.print((screeningPhase / 2) + 1);
-                Serial.println("...");
-
-                PPGManager_wakeUp();
-                PPGManager_setupPhase2(isSpo2Missed == false); // lowPower = true nếu không bị lỡ SpO2
-            }
-        }
-        else if (screeningPhase == 3 || screeningPhase == 5 || screeningPhase == 7) {
-            // ĐANG ĐO PHA PHỤ (Pha 2, 3, 4 - 30 giây)
-            // Tích luỹ BPM/SpO2 mỗi 1 giây
-            if (now - lastSampleAccumTime >= 1000) {
-                lastSampleAccumTime = now;
-                uint8_t bpm = PPGManager_getBPM();
-                uint8_t spo2 = PPGManager_getSpO2();
-                if (bpm > 0) {
-                    bpmSum += bpm;
-                    if (isSpo2Missed && spo2 > 0) {
-                        spo2Sum += spo2;
-                    }
-                    validSampleCount++;
-                }
-            }
-            
-            // Đã đo đủ 30 giây
-            if (now - phaseStartTime >= 30000UL) {
-                PPGManager_shutDown();
-                
-                uint8_t avgBPM = 0;
-                uint8_t avgSpO2 = 0;
-                if (validSampleCount > 0) {
-                    avgBPM = bpmSum / validSampleCount;
-                    if (isSpo2Missed) {
-                        avgSpO2 = spo2Sum / validSampleCount;
-                    }
-                }
-                
-                // Lọc BPM trước khi gửi
-                uint8_t finalBPMReport = 0;
-                if (avgBPM > 40 && avgBPM < 255) {
-                    finalBPMReport = avgBPM;
-                } else {
-                    finalBPMReport = 0;
-                }
-                
-                // Xác định SpO2 gửi đi
-                uint8_t finalSpO2Report = isSpo2Missed ? avgSpO2 : phase1AvgSpO2;
-                uint8_t phaseNumber = (screeningPhase / 2) + 1;
-                
-                Serial.print("[SCREENING] Pha ");
-                Serial.print(phaseNumber);
-                Serial.print(" hoàn tất! Avg BPM: ");
-                Serial.print(avgBPM);
-                Serial.print(" (Gửi: ");
-                Serial.print(finalBPMReport);
-                Serial.print(") | SpO2: ");
-                Serial.println(finalSpO2Report);
-                
-                // Gửi qua Characteristic 2 (Báo cáo trung bình các pha 2, 3, 4)
-                if (BLEManager_isConnected()) {
-                    char report[32];
-                    snprintf(report, sizeof(report), "R2:%u,%u\n", finalBPMReport, finalSpO2Report);
-                    BLEManager_notifyReport(report, strlen(report));
-                }
-                
-                // Tính toán mốc mục tiêu cho pha tiếp theo
-                uint8_t nextSleepPhase = 4;
-                unsigned long targetMs = 300000UL; // Mốc mặc định Pha 2 -> 3 (300s = 5 min)
-
-                if (screeningPhase == 3) {
-                    nextSleepPhase = 4;
-                    targetMs = 300000UL; // 5.0 phút
-                } else if (screeningPhase == 5) {
-                    nextSleepPhase = 6;
-                    targetMs = 450000UL; // 7.5 phút
-                } else if (screeningPhase == 7) {
-                    nextSleepPhase = 8;
-                    targetMs = 600000UL; // 10.0 phút (Kết thúc chu kỳ)
-                }
-
-                screeningPhase = nextSleepPhase;
-                phaseSleepStart = millis();
-                long targetTime = screeningCycleStart + targetMs;
-                long remaining = targetTime - (long)millis();
-                phaseSleepDuration = remaining > 0 ? remaining : 0;
-                
-                Serial.print("[SCREENING] Ngủ động ");
-                Serial.print(phaseSleepDuration / 1000);
-                Serial.print(" giây để đến mốc ");
-                Serial.print(targetMs / 1000);
-                Serial.println("s...");
-            }
-        }
-        else if (screeningPhase == 8) {
-            // ĐANG NGHỈ KẾT THÚC CHU KỲ (đến mốc 600s = 10 phút) -> Bắt đầu lại chu kỳ 10 phút mới
-            if (now - phaseSleepStart >= phaseSleepDuration) {
-                Serial.println("[SCREENING] Đã xong 10 phút chu kỳ. Bắt đầu chu kỳ 10 phút mới (Pha 1)...");
-                screeningCycleStart = millis();
-                screeningPhase = 1;
-                phaseStartTime = millis();
-                bpmSum = 0;
-                spo2Sum = 0;
-                validSampleCount = 0;
-                screeningRetryCount = 0;
-                isSpo2Missed = false;
-                lastSampleAccumTime = millis();
-                
-                PPGManager_wakeUp();
-                PPGManager_setupPhase1();
-            }
-        }
-    }
+  if (currentMode == MODE_IDLE) idleLoop();
+  else if (currentMode == MODE_SCREENING) screeningLoop();
 }
 
 DeviceMode DeviceStateManager_getMode() {
-    return currentMode;
+  return currentMode;
 }
 
-static void DeviceStateManager_requestMode(DeviceMode newMode) {
-    if (newMode == currentMode || newMode == pendingMode) {
-        return;
-    }
-    pendingMode = newMode;
+// Đổi chế độ không làm ngay mà để DeviceStateManager_loop() thực hiện (exitMode -> enterMode)
+static void requestMode(DeviceMode newMode) {
+  if (newMode == currentMode || newMode == pendingMode) return;
+  pendingMode = newMode;
 }
 
 static void enterMode(DeviceMode mode) {
-    switch (mode) {
-        case MODE_IDLE:
-            Serial.println("Mode IDLE");
-            PPGManager_shutDown();
-            AccelManager_setMotionThreshold(20);
-            // Giữ BLE advertising bật khi IDLE để điện thoại luôn tìm thấy và chủ động kết nối được
-            if (!BLEManager_isConnected()) {
-                BLEManager_startAdvertising();
-                Serial.println("[BLE] Đang bật advertising (IDLE)");
-            }
-            break;
+  switch (mode) {
+    case MODE_IDLE:
+      Serial.println("Mode IDLE");
+      PPGManager_shutDown();
+      AccelManager_setMotionThreshold(MOTION_THRESHOLD_IDLE);
+      // Luôn quảng bá BLE khi IDLE để điện thoại tìm thấy và kết nối được
+      if (!BLEManager_isConnected()) {
+        BLEManager_startAdvertising();
+        Serial.println("[BLE] Đang bật advertising (IDLE)");
+      }
+      break;
 
-        case MODE_MEASURE:
-            Serial.println("Mode MEASURE");
-            PPGManager_wakeUp();
-            AccelManager_setMotionThreshold(5);
-            break;
+    case MODE_MEASURE:
+      Serial.println("Mode MEASURE");
+      PPGManager_wakeUp();
+      AccelManager_setMotionThreshold(MOTION_THRESHOLD_MEASURE);
+      break;
 
-        case MODE_WORKOUT:
-            Serial.println("Mode WORKOUT");
-            PPGManager_wakeUp();
-            AccelManager_setMotionThreshold(20);
-            break;
+    case MODE_WORKOUT:
+      Serial.println("Mode WORKOUT");
+      PPGManager_wakeUp();
+      AccelManager_setMotionThreshold(MOTION_THRESHOLD_WORKOUT);
+      break;
 
-        case MODE_SCREENING:
-            Serial.println("Mode SCREENING");
-            screeningCycleStart = millis();
-            screeningPhase = 1; // Bắt đầu Pha 1
-            screeningRetryCount = 0;
-            isSpo2Missed = false;
-            phase1AvgSpO2 = 0;
-            phaseStartTime = millis();
-            
-            bpmSum = 0;
-            spo2Sum = 0;
-            validSampleCount = 0;
-            lastSampleAccumTime = millis();
-            
-            PPGManager_wakeUp();
-            PPGManager_setupPhase1();
-            AccelManager_setMotionThreshold(8);
-            break;
+    case MODE_SCREENING:
+      Serial.println("Mode SCREENING");
+      phase1AvgSpO2 = 0;
+      startCycle();
+      AccelManager_setMotionThreshold(MOTION_THRESHOLD_SCREENING);
+      break;
 
-        case MODE_SHUTDOWN:
-            Serial.println("Mode SHUTDOWN");
-            PPGManager_shutDown();
-            DisplayPower_showRed();   // Báo hiệu đang tắt (đỏ 1 giây)
-            delay(1000);
-            DisplayPower_showOff();
-            // Tắt nguồn MPU6050 để tiết kiệm pin khi deep sleep
-            digitalWrite(accelVddPin_stored, LOW);
-            Serial.println("[POWER] Đã tắt nguồn MPU6050");
-            pinMode(D4, INPUT);
-            pinMode(D5, INPUT);
-            delay(100);
-            esp_deep_sleep_enable_gpio_wakeup(1ULL << wakeButtonPin, ESP_GPIO_WAKEUP_GPIO_LOW);
-            esp_deep_sleep_start();
-            break;
-        case MODE_TURN_ON:
-            Serial.println("Mode TURN_ON");
-            DisplayPower_showOn();
-            isLEDOn = true;
-            ledWakeTime = millis();
-            DeviceStateManager_requestMode(MODE_IDLE);
-            break;
-    }
+    case MODE_SHUTDOWN:
+      Serial.println("Mode SHUTDOWN");
+      PPGManager_shutDown();
+      DisplayPower_showRed();  // Báo đang tắt: đỏ 1 giây
+      delay(1000);
+      DisplayPower_showOff();
+      digitalWrite(accelVddPin, LOW);  // Ngắt nguồn MPU6050 khi deep sleep
+      Serial.println("[POWER] Đã tắt nguồn MPU6050");
+      // Thả nổi I2C để không rò dòng qua điện trở kéo lên khi cảm biến đã mất nguồn
+      pinMode(I2C_SDA_PIN, INPUT);
+      pinMode(I2C_SCL_PIN, INPUT);
+      delay(100);
+      esp_deep_sleep_enable_gpio_wakeup(1ULL << wakeButtonPin, ESP_GPIO_WAKEUP_GPIO_LOW);
+      esp_deep_sleep_start();
+      break;
+
+    case MODE_TURN_ON:
+      Serial.println("Mode TURN_ON");
+      flashLED();
+      requestMode(MODE_IDLE);
+      break;
+  }
 }
 
 static void exitMode(DeviceMode mode) {
-    switch (mode) {
-        case MODE_SCREENING:
-            screeningStartTime = 0;
-            screeningPhase = 0;
-            break;
+  switch (mode) {
+    case MODE_SCREENING:
+      screeningPhase = PHASE_NONE;
+      break;
 
-        case MODE_IDLE:
-            // Bật lại BLE advertising khi thoát IDLE (bắt đầu đo)
-            BLEManager_startAdvertising();
-            Serial.println("[BLE] Đã bật advertising (thoát IDLE)");
-            break;
+    case MODE_IDLE:
+      BLEManager_startAdvertising();
+      Serial.println("[BLE] Đã bật advertising (thoát IDLE)");
+      break;
 
-        case MODE_MEASURE:
-        case MODE_WORKOUT:
-        default:
-            break;
-    }
+    default:
+      break;
+  }
 }

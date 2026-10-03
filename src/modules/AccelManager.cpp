@@ -2,18 +2,25 @@
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <Arduino.h>
+#include "../config.h"
 
 static Adafruit_MPU6050 mpu;
 static bool mpuReady = false;
-volatile bool isMoving = false;
-static volatile uint32_t motionIsrCount = 0;
+static volatile bool isMoving = false;
 static uint8_t motionStatus;
 
-// Hàm Ngắt ISR (Bắt buộc phải có chữ IRAM_ATTR trên ESP32)
-// Hàm này chạy cực nhanh, chớp nhoáng khi chân INT có tín hiệu
-void IRAM_ATTR mpuInterruptHandler() {
-  isMoving = true; 
-  motionIsrCount++;
+// Đếm bước (peak detection trên độ lớn gia tốc)
+#define PEDOMETER_SAMPLE_MS   40      // 25Hz
+#define STEP_PEAK_MS2         12.2f   // ~2,4 m/s² trên trọng lực 9,8 m/s²
+#define STEP_MIN_INTERVAL_MS  280
+#define STEP_MAX_INTERVAL_MS  1200
+static uint32_t stepCount = 0;
+static unsigned long lastStepTime = 0;
+static float prevAccelMag = 9.81f;
+
+// ISR phải nằm trong IRAM trên ESP32 và chạy thật nhanh: chỉ bật cờ
+static void IRAM_ATTR mpuInterruptHandler() {
+  isMoving = true;
 }
 
 bool AccelManager_begin(uint8_t intPin) {
@@ -23,44 +30,28 @@ bool AccelManager_begin(uint8_t intPin) {
   }
   mpuReady = true;
 
-  //Thiết lập bộ lộc thông cao (High Pass Filter) để bỏ qua trọng lực Trái Đất
+  // Lọc thông cao: bỏ thành phần trọng lực, chỉ giữ cử động
   mpu.setHighPassFilter(MPU6050_HIGHPASS_0_63_HZ);
-
-  //Thiết lập ngưỡng phát hiện chuyển động (1-255)
-  //Số càng to, vung tay càng mạnh thì cảm biến mới báo cáo về mạch
-  mpu.setMotionDetectionThreshold(5);
-
-  //Thiết lập thời gian chuyển động tối thiểu (1-255ms) để loại bỏ nhiễu rung lắc nhẹ
+  // Ngưỡng (1-255) và thời gian tối thiểu (ms) của một lần vung tay; ngưỡng đổi theo chế độ qua setMotionThreshold
+  mpu.setMotionDetectionThreshold(MOTION_THRESHOLD_MEASURE);
   mpu.setMotionDetectionDuration(20);
-
-  /**
-   * Thiết lập giới hạn tầm đo của cảm biến gia tốc
-   * Cảm biến MPU6050 có các dải đo từ ±2g, ±4g, ±8g đến ±16g.
-   * Nếu để ±2g: Quá nhạy, vung tay nhẹ là thông số bị chạm trần (clipping).
-   * Nếu để ±16g: Dùng để đo va chạm mạnh (như tai nạn ô tô), dùng cho cổ tay sẽ bị kém nhạy, khó nhận biết cử động.
-   * 
-   * Mức ±4g là "điểm ngọt" (sweet spot) hoàn hảo nhất để theo dõi chuyển động sinh lý học của con người (đi bộ, chạy bộ, vung tay)
-   */
+  // ±4g: đủ nhạy cho đi bộ / chạy / vung tay mà không bị chạm trần như ±2g
   mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
-  //Bật Bộ lọc thông thấp kỹ thuật số (DLPF - Digital Low Pass Filter) tích hợp sẵn trong phần cứng MPU6050 ở tần số cắt 21Hz.
+  // Lọc thông thấp phần cứng 21Hz
   mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-  //Đưa cả 3 trục X, Y, Z của cảm biến con quay hồi chuyển (Gyroscope) vào chế độ ngủ sâu vì không cần Gyro.
+  // Không dùng con quay và cảm biến nhiệt: cho ngủ để tiết kiệm pin
   mpu.setGyroStandby(true, true, true);
-  //Tắt cảm biến nhiệt độ bên trong MPU6050 vi không cần thiết.
   mpu.setTemperatureStandby(true);
 
-  //Kích hoạt chân ngắt (Interuption - INT)
+  // Chân INT: chốt mức, active-high, báo khi có chuyển động
   mpu.setInterruptPinLatch(true);
   mpu.setInterruptPinPolarity(false);
   mpu.setMotionInterrupt(true);
 
-  // Kích hoạt ngắt trên ESP32
   pinMode(intPin, INPUT_PULLDOWN);
-  // FALLING, RISING hoặc CHANGE tùy thuộc vào Polarity ở trên (Mặc định RISING là từ 0V lên 3.3V)
   attachInterrupt(digitalPinToInterrupt(intPin), mpuInterruptHandler, RISING);
 
   Serial.println("MPU6050 OK và đã bật Ngắt chuyển động!");
-
   return true;
 }
 
@@ -75,78 +66,64 @@ bool AccelManager_popMotionEvent() {
     isMoving = false;
   }
   interrupts();
-  if (motionEvent) {
-    motionStatus = mpu.getMotionInterruptStatus();
-  }
+  // Đọc thanh ghi trạng thái để nhả chân INT đang chốt
+  if (motionEvent) motionStatus = mpu.getMotionInterruptStatus();
   return motionEvent;
 }
 
-static uint32_t stepCount = 0;
-static unsigned long lastStepTime = 0;
-static float prevAccelMag = 9.81f;
-
 uint32_t AccelManager_getStepCount() {
-    return stepCount;
+  return stepCount;
 }
 
 void AccelManager_resetStepCount() {
-    stepCount = 0;
-    lastStepTime = 0;
+  stepCount = 0;
+  lastStepTime = 0;
 }
 
 void AccelManager_updatePedometer() {
-    if (!mpuReady) return;
+  if (!mpuReady) return;
 
-    static unsigned long lastSampleTime = 0;
-    unsigned long now = millis();
+  static unsigned long lastSampleTime = 0;
+  unsigned long now = millis();
+  if (now - lastSampleTime < PEDOMETER_SAMPLE_MS) return;
+  lastSampleTime = now;
 
-    // Lấy mẫu gia tốc mỗi 40ms (25Hz) cho thuật toán Pedometer Peak Detection
-    if (now - lastSampleTime < 40) return;
-    lastSampleTime = now;
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+  float mag = sqrt(a.acceleration.x * a.acceleration.x +
+                   a.acceleration.y * a.acceleration.y +
+                   a.acceleration.z * a.acceleration.z);
 
-    sensors_event_t a, g, temp;
-    mpu.getEvent(&a, &g, &temp);
-
-    // Tính độ lớn gia tốc tổng hợp A = sqrt(ax^2 + ay^2 + az^2)
-    float mag = sqrt(a.acceleration.x * a.acceleration.x +
-                     a.acceleration.y * a.acceleration.y +
-                     a.acceleration.z * a.acceleration.z);
-
-    // Peak detection: Ngưỡng phát hiện bước chân > 12.2 m/s² (tương đương chênh > 2.4 m/s² so với trọng lực 9.8m/s²)
-    // Cửa sổ thời gian giữa 2 bước hợp lệ: 280ms đến 1200ms
-    if (mag > 12.2f && prevAccelMag <= 12.2f) {
-        if (now - lastStepTime >= 280 && now - lastStepTime <= 1200) {
-            stepCount++;
-            lastStepTime = now;
-        } else if (lastStepTime == 0) {
-            stepCount++;
-            lastStepTime = now;
-        }
+  // Một bước = vượt ngưỡng đi lên, cách bước trước 280-1200ms (bước đầu tiên luôn tính)
+  if (mag > STEP_PEAK_MS2 && prevAccelMag <= STEP_PEAK_MS2) {
+    unsigned long sinceLastStep = now - lastStepTime;
+    if (lastStepTime == 0 || (sinceLastStep >= STEP_MIN_INTERVAL_MS && sinceLastStep <= STEP_MAX_INTERVAL_MS)) {
+      stepCount++;
+      lastStepTime = now;
     }
-    prevAccelMag = mag;
+  }
+  prevAccelMag = mag;
 }
 
 void AccelManager_process() {
-    if (!mpuReady) return;
-    AccelManager_updatePedometer();
+  AccelManager_updatePedometer();
 }
 
 void AccelManager_printDebug() {
+#if HS_LOG_ACCEL_DEBUG
   static unsigned long lastDebugPrint = 0;
-  if (!mpuReady) return;
+  if (!mpuReady || millis() - lastDebugPrint < 1000) return;
+  lastDebugPrint = millis();
 
-  if (millis() - lastDebugPrint >= 1000) {
-    lastDebugPrint = millis();
-
-    Serial.print("[");
-    Serial.print(millis());
-    Serial.print("] [ACCEL-DBG] isMoving=");
-    Serial.print(isMoving ? "1" : "0");
-    Serial.print(" | steps=");
-    Serial.print(stepCount);
-    Serial.print(" | motionStatus=");
-    Serial.println(motionStatus);
-  }
+  Serial.print("[");
+  Serial.print(millis());
+  Serial.print("] [ACCEL-DBG] isMoving=");
+  Serial.print(isMoving ? "1" : "0");
+  Serial.print(" | steps=");
+  Serial.print(stepCount);
+  Serial.print(" | motionStatus=");
+  Serial.println(motionStatus);
+#endif
 }
 
 void AccelManager_setMotionThreshold(uint8_t threshold) {

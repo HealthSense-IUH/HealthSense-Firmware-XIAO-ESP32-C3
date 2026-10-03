@@ -90,9 +90,10 @@ try:
         print(f"Nhận được: {line}")
 
         # --- Phát hiện KẾT THÚC session ---
-        # Firmware in "[SCREENING] Xong 1 phut" khi hết 60s đo
+        # Firmware in "[SCREENING] Pha 1 thành công!" khi hết 60s đo pha 1
+        # ("[SCREENING] Xong 1 phut" là dòng của bản firmware cũ, vẫn nhận)
         # Firmware in "[UNWEAR] Da thao dong ho" khi tháo thiết bị
-        if "[SCREENING] Xong 1 phut" in line or "[UNWEAR]" in line:
+        if "[SCREENING] Pha 1 thành công" in line or "[SCREENING] Xong 1 phut" in line or "[UNWEAR]" in line:
             if current_file is not None:
                 reason = "hết 60s đo" if "[SCREENING]" in line else "tháo thiết bị"
                 close_current_session(reason)

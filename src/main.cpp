@@ -1,132 +1,113 @@
-// Refactored main: delegates to module managers for BLE, PPG, accel, display/power
+// HealthSense firmware (XIAO ESP32-C3): main chỉ khởi tạo module và điều phối luồng dữ liệu theo chế độ.
+// Logic chế độ / sàng lọc AFib nằm ở DeviceStateManager; giao thức BLE ở BleProtocol.h; chân và ngưỡng ở config.h.
 #include <Arduino.h>
+#include "config.h"
 #include "modules/BLEManager.h"
+#include "modules/BleProtocol.h"
 #include "modules/PPGManager.h"
 #include "modules/AccelManager.h"
 #include "modules/DisplayPower.h"
 #include "modules/DeviceStateManager.h"
 
-// >>> CẤU HÌNH PINOUT <<<
-#define BUTTON_PIN D3
-#define LED_PIN    D0
-#define ACCEL_VDD  D10   // Nguồn MPU6050 nối chân D10
+static void goToDeepSleep() {
+  esp_deep_sleep_enable_gpio_wakeup(1ULL << BUTTON_PIN, ESP_GPIO_WAKEUP_GPIO_LOW);
+  esp_deep_sleep_start();
+}
 
-#define MPU6050_INT_PIN D2
-const byte Max30102InterruptPin = D6;
+/** Thức dậy từ deep sleep do nút: phải giữ đủ WAKE_HOLD_MS, nhả sớm thì ngủ tiếp (tránh bật nhầm). */
+static void requireLongPressToWake() {
+  if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_GPIO) return;
+  unsigned long wakeStartTime = millis();
+  while (millis() - wakeStartTime < WAKE_HOLD_MS) {
+    if (digitalRead(BUTTON_PIN) == HIGH) goToDeepSleep();
+    delay(10);
+  }
+}
 
 void setup() {
-  setCpuFrequencyMhz(80); // Giảm CPU 240MHz -> 80MHz để tiết kiệm pin
+  setCpuFrequencyMhz(CPU_FREQ_MHZ);
   Serial.begin(115200);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  requireLongPressToWake();
 
-  // wake-from-deep-sleep check (preserve original behavior)
-  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO) {
-    long wakeStartTime = millis();
-    bool heldLongEnough = true;
-    while (millis() - wakeStartTime < 3000) {
-      if (digitalRead(BUTTON_PIN) == HIGH) { heldLongEnough = false; break; }
-      delay(10);
-    }
-    if (!heldLongEnough) {
-      esp_deep_sleep_enable_gpio_wakeup(1ULL << BUTTON_PIN, ESP_GPIO_WAKEUP_GPIO_LOW);
-      esp_deep_sleep_start();
-    }
-  }
+  DisplayPower_begin(ACCEL_VDD_PIN, LED_PIN);
 
-  // power & display
-  DisplayPower_begin(ACCEL_VDD, LED_PIN);
-
-  // accel
   Serial.println("Dang khoi tao MPU6050...");
-  if (!AccelManager_begin(MPU6050_INT_PIN)) {
-    Serial.println("LOI: Khong tim thay MPU6050!");
-  } else {
-    Serial.println("MPU6050 OK!");
-  }
+  Serial.println(AccelManager_begin(MPU6050_INT_PIN) ? "MPU6050 OK!" : "LOI: Khong tim thay MPU6050!");
 
-  // BLE
   BLEManager_begin();
 
-  // PPG sensor
   Serial.println("Dang khoi tao MAX30102...");
-  if (!PPGManager_begin(Max30102InterruptPin)) {
+  if (!PPGManager_begin(MAX30102_INT_PIN)) {
     Serial.println("LOI: Khong tim thay MAX30102!");
     while (1);
   }
   Serial.println("MAX30102 OK!");
 
-  DeviceStateManager_begin(BUTTON_PIN, ACCEL_VDD);
+  DeviceStateManager_begin(BUTTON_PIN, ACCEL_VDD_PIN);
+}
+
+/** WORKOUT: gom BPM + bước chân gửi mỗi 3 giây (mất kết nối thì ghi đệm), không gửi PPG thô. */
+static void streamWorkout() {
+  static unsigned long lastVitalsSend = 0;
+  if (millis() - lastVitalsSend >= WORKOUT_VITALS_INTERVAL_MS) {
+    lastVitalsSend = millis();
+    uint8_t bpm = PPGManager_getBPM();
+    uint32_t steps = AccelManager_getStepCount();
+
+    if (BLEManager_isConnected()) {
+      char buf[64];
+      int len = snprintf(buf, sizeof(buf), FMT_WORKOUT, (unsigned long)millis(), (unsigned int)bpm,
+                         (unsigned long)steps);
+      BLEManager_notifyReport(buf, len);
+    } else {
+      BLEManager_pushOfflineSample(bpm, steps);
+    }
+  }
+  PPGManager_discardPacket();
+}
+
+/** MEASURE / SCREENING: gửi PPG thô theo gói 10 mẫu (millis,red,ir,bpm,spo2). */
+static void streamPPG() {
+  char packet[512];
+  size_t len = 0;
+  if (PPGManager_popPacket(packet, sizeof(packet), &len) && BLEManager_isConnected()) {
+    BLEManager_notify(packet, len);
+  }
 }
 
 void loop() {
   DeviceStateManager_handleButton();
 
-  // accel loop
   AccelManager_process();
   AccelManager_printDebug();
+  if (AccelManager_popMotionEvent()) DeviceStateManager_onEvent(EVT_MOTION);
 
-  if (AccelManager_popMotionEvent()) {
-    DeviceStateManager_onEvent(EVT_MOTION);
-  }
-
-  // PPG processing (driven by interrupt)
   PPGManager_process();
-
   if (PPGManager_popNoFingerEvent()) {
     DeviceStateManager_onEvent(EVT_NOT_WEARING);
     Serial.println("[UNWEAR] Da thao dong ho. Tat LED tiet kiem pin!");
   }
 
-  DeviceMode mode = DeviceStateManager_getMode();
-
-  if (mode == MODE_WORKOUT) {
-    // Workout: gom phát vitals (BPM + Pedometer Steps) mỗi 3 giây (Batching tiết kiệm pin)
-    static unsigned long lastVitalsSend = 0;
-    if (millis() - lastVitalsSend >= 3000) {
-      lastVitalsSend = millis();
-      uint8_t bpm = PPGManager_getBPM();
-      uint32_t steps = AccelManager_getStepCount();
-
-      if (BLEManager_isConnected()) {
-        char buf[64];
-        size_t len = (size_t)snprintf(buf, sizeof(buf), "W:%lu,%u,%lu\n",
-                                      (unsigned long)millis(), (unsigned int)bpm, (unsigned long)steps);
-        BLEManager_notifyReport(buf, len);
-      } else {
-        // Ghi đệm Ring Buffer dữ liệu offline khi bị ngắt kết nối BLE
-        BLEManager_pushOfflineSample(bpm, steps);
-      }
-    }
-    // Drain PPG packet buffer để tránh tràn bộ nhớ (không gửi raw PPG ở workout)
-    { char drain[512]; size_t dl = 0; PPGManager_popPacket(drain, sizeof(drain), &dl); }
-
-  } else if (mode == MODE_MEASURE || mode == MODE_SCREENING) {
-    // Measure / Screening: gửi batch PPG + vitals (format: millis,red,ir,bpm,spo2)
-    char packet[512];
-    size_t len = 0;
-    if (PPGManager_popPacket(packet, sizeof(packet), &len)) {
-      if (BLEManager_isConnected()) {
-        BLEManager_notify(packet, len);
-      }
-    }
+  switch (DeviceStateManager_getMode()) {
+    case MODE_WORKOUT:
+      streamWorkout();
+      break;
+    case MODE_MEASURE:
+    case MODE_SCREENING:
+      streamPPG();
+      break;
+    default:
+      break;  // IDLE / SHUTDOWN / TURN_ON: không gửi dữ liệu
   }
-  // IDLE / SHUTDOWN / TURN_ON: không gửi BLE data
 
   DeviceStateManager_loop();
+  BLEManager_loop();
 
   static unsigned long lastBatteryUpdateTime = 0;
-  if (millis() - lastBatteryUpdateTime >= 30000) {
+  if (millis() - lastBatteryUpdateTime >= BATTERY_UPDATE_INTERVAL_MS) {
     lastBatteryUpdateTime = millis();
     BLEManager_updateBatteryLevel();
-  }
-
-  static unsigned long lastSerialPrintTime = 0;
-  if (millis() - lastSerialPrintTime >= 1000) {
-    lastSerialPrintTime = millis();
-    // Serial.print("BPM: ");
-    // Serial.print(PPGManager_getBPM());
-    // Serial.print(" | SpO2: ");
-    // Serial.println(PPGManager_getSpO2());
   }
 
   if (!BLEManager_isConnected()) delay(1);

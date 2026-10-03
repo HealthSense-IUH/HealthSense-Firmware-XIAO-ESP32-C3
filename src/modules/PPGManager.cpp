@@ -3,19 +3,23 @@
 #include <heartRate.h>
 #include <Arduino.h>
 #include "AccelManager.h"
+#include "BleProtocol.h"
+#include "../config.h"
 
 static MAX30105 particleSensor;
-static const byte* interruptPinPtr = nullptr;
 static volatile bool dataReady = false;
 
-#define PPG_PACKET_SIZE_LOCAL 10
+// Gói BLE: gom PPG_PACKET_SAMPLES mẫu "millis,red,ir,bpm,spo2" rồi mới gửi
+#define PPG_PACKET_SAMPLES 10
 static char ppgPayload[512] = "";
+static size_t ppgPayloadLen = 0;
 static uint8_t ppgSampleCount = 0;
 
-// buffers for SpO2 calculation
-#define BUFFER_SIZE_LOCAL 167
-static uint32_t redBuffer[BUFFER_SIZE_LOCAL];
-static uint32_t irBuffer[BUFFER_SIZE_LOCAL];
+// Cửa sổ tính SpO2 (~1,7 giây ở 100Hz)
+#define SPO2_WINDOW 167
+#define SPO2_RECALC_EVERY 100  // 100Hz -> tính lại mỗi giây
+static uint32_t redBuffer[SPO2_WINDOW];
+static uint32_t irBuffer[SPO2_WINDOW];
 static int bufferIndex = 0;
 static bool bufferFull = false;
 
@@ -24,12 +28,42 @@ static uint8_t finalSpO2 = 0;
 static long lastBeatTime = 0;
 static float beatAvg = 0;
 
-// no-finger detection (mirror original behavior)
+// Phát hiện tháo thiết bị: IR dưới ngưỡng liên tục NO_FINGER_MS
 static unsigned long noFingerStartTime = 0;
-static volatile bool noFingerEventFlag = false;
+static bool noFingerEventFlag = false;
+
+// Lọc trung vị 3 mẫu gần nhất để bỏ giá trị nhảy vọt
+struct Median3 {
+  uint8_t v[3] = {0, 0, 0};
+  uint8_t push(uint8_t value) {
+    v[0] = v[1]; v[1] = v[2]; v[2] = value;
+    uint8_t x = v[0], y = v[1], z = v[2];
+    if ((x - y) * (z - x) >= 0) return x;
+    if ((y - x) * (z - y) >= 0) return y;
+    return z;
+  }
+};
+static Median3 bpmFilter;
+static Median3 spo2Filter;
 
 void IRAM_ATTR PPGManager_handleInterrupt() {
   dataReady = true;
+}
+
+/** Xóa kết quả đo và cửa sổ SpO2 (khi đổi cấu hình cảm biến hoặc tháo thiết bị). */
+static void resetMeasurement() {
+  bufferIndex = 0;
+  bufferFull = false;
+  finalBPM = 0;
+  finalSpO2 = 0;
+  beatAvg = 0;
+}
+
+/** Cấu hình đo đầy đủ: 400Hz, trung bình 4 mẫu, LED đỏ + IR (dùng khi bật máy, MEASURE và pha 1 sàng lọc). */
+static void configureFullPower() {
+  particleSensor.setup(30, 4, 2, 400, 215, 16384);
+  particleSensor.setPulseAmplitudeRed(85);
+  particleSensor.setPulseAmplitudeIR(85);
 }
 
 bool PPGManager_begin(uint8_t interruptPin) {
@@ -38,21 +72,7 @@ bool PPGManager_begin(uint8_t interruptPin) {
   }
 
   Wire.setTimeOut(25);
-  // particleSensor.setup(30, 4, 2, 400, 411, 16384);
-  particleSensor.setup(30, 4, 2, 400, 215, 16384);
-  // particleSensor.setup(30, 2, 2, 200, 215, 16384);
-  // particleSensor.setPulseAmplitudeRed(15);
-  // particleSensor.setPulseAmplitudeIR(60);
-  // particleSensor.setPulseAmplitudeRed(127);
-  // particleSensor.setPulseAmplitudeIR(127);
-  particleSensor.setPulseAmplitudeRed(85);
-  particleSensor.setPulseAmplitudeIR(85);
-  // particleSensor.setPulseAmplitudeRed(80);
-  // particleSensor.setPulseAmplitudeIR(80);
-  // particleSensor.setPulseAmplitudeRed(50);
-  // particleSensor.setPulseAmplitudeIR(70);
-  // particleSensor.setPulseAmplitudeRed(60);
-  // particleSensor.setPulseAmplitudeIR(60);
+  configureFullPower();
 
   pinMode(interruptPin, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(interruptPin), PPGManager_handleInterrupt, FALLING);
@@ -75,22 +95,54 @@ void PPGManager_shutDown() {
   particleSensor.shutDown();
 }
 
-static uint8_t filter3_BPM(uint8_t newVal) {
-  static uint8_t b_bpm[3] = {0,0,0};
-  b_bpm[0] = b_bpm[1]; b_bpm[1] = b_bpm[2]; b_bpm[2] = newVal;
-  uint8_t x=b_bpm[0], y=b_bpm[1], z=b_bpm[2];
-  if ((x - y) * (z - x) >= 0) return x;
-  if ((y - x) * (z - y) >= 0) return y;
-  return z;
+/** Thêm một mẫu vào gói BLE đang gom (bỏ mẫu nếu gói đã đầy). */
+static void appendToPacket(long redValue, long irValue) {
+  char sample[64];
+  int len = snprintf(sample, sizeof(sample), FMT_PPG_SAMPLE, (unsigned long)millis(),
+                     (unsigned long)redValue, (unsigned long)irValue, finalBPM, finalSpO2);
+  if (len > 0 && ppgPayloadLen + (size_t)len < sizeof(ppgPayload)) {
+    memcpy(ppgPayload + ppgPayloadLen, sample, (size_t)len + 1);
+    ppgPayloadLen += (size_t)len;
+    ppgSampleCount++;
+  }
 }
 
-static uint8_t filter3_SpO2(uint8_t newVal) {
-  static uint8_t b_spo2[3] = {0,0,0};
-  b_spo2[0] = b_spo2[1]; b_spo2[1] = b_spo2[2]; b_spo2[2] = newVal;
-  uint8_t x=b_spo2[0], y=b_spo2[1], z=b_spo2[2];
-  if ((x - y) * (z - x) >= 0) return x;
-  if ((y - x) * (z - y) >= 0) return y;
-  return z;
+/** BPM từ khoảng cách giữa 2 nhịp, làm mượt rồi lọc trung vị. */
+static void updateHeartRate(long irValue) {
+  if (!checkForBeat(irValue)) return;
+  long delta = millis() - lastBeatTime;
+  lastBeatTime = millis();
+  float beatsPerMinute = 60000.0 / delta;
+  if (beatsPerMinute > 40 && beatsPerMinute < 255) {
+    beatAvg = beatAvg == 0 ? beatsPerMinute : (beatAvg * 0.2) + (beatsPerMinute * 0.8);
+    finalBPM = bpmFilter.push((uint8_t)beatAvg);
+  }
+}
+
+/** SpO2 theo tỷ số R = (AC/DC đỏ) / (AC/DC hồng ngoại) trên cửa sổ gần nhất, tính lại mỗi giây. */
+static void updateSpO2() {
+  static uint8_t recalcCounter = 0;
+  if (!bufferFull || ++recalcCounter < SPO2_RECALC_EVERY) return;
+  recalcCounter = 0;
+
+  uint32_t minRed = redBuffer[0], maxRed = redBuffer[0];
+  uint32_t minIR = irBuffer[0], maxIR = irBuffer[0];
+  for (int i = 1; i < SPO2_WINDOW; i++) {
+    if (redBuffer[i] < minRed) minRed = redBuffer[i];
+    if (redBuffer[i] > maxRed) maxRed = redBuffer[i];
+    if (irBuffer[i] < minIR) minIR = irBuffer[i];
+    if (irBuffer[i] > maxIR) maxIR = irBuffer[i];
+  }
+  long acRed = maxRed - minRed;
+  long dcRed = minRed;
+  long acIR = maxIR - minIR;
+  long dcIR = minIR;
+  if (acIR <= 0 || dcRed <= 0) return;
+
+  float rValue = ((float)acRed / dcRed) / ((float)acIR / dcIR);
+  float spo2 = 110.0 - (17.0 * rValue);
+  if (spo2 > 100.0) spo2 = 100.0;
+  if (spo2 >= 80.0) finalSpO2 = spo2Filter.push((uint8_t)spo2);
 }
 
 void PPGManager_process() {
@@ -105,147 +157,74 @@ void PPGManager_process() {
     long irValue = particleSensor.getFIFOIR();
     long redValue = particleSensor.getFIFORed();
 
-    if (irValue < 50000) {
-      if (noFingerStartTime == 0) {
-        noFingerStartTime = millis();
-      }
-      if (millis() - noFingerStartTime > 2000) {
-        // reset internal PPG state
-        finalBPM = 0;
-        finalSpO2 = 0;
-        beatAvg = 0;
-        bufferIndex = 0;
-        bufferFull = false;
+    if (irValue < WEAR_IR_THRESHOLD) {
+      if (noFingerStartTime == 0) noFingerStartTime = millis();
+      if (millis() - noFingerStartTime > NO_FINGER_MS) {
+        // Đã tháo: xóa kết quả, báo sự kiện; tắt cảm biến là việc của DeviceStateManager
+        resetMeasurement();
         noFingerEventFlag = true;
         noFingerStartTime = 0;
-        // leave shutdown to caller
-        break; // stop processing FIFO
+        break;
       }
     } else {
       noFingerStartTime = 0;
-      // package for BLE
-      char tempStr[64];
-      sprintf(tempStr, "%lu,%u,%u,%u,%u\n", millis(), (uint32_t)redValue, (uint32_t)irValue, finalBPM, finalSpO2);
-      if (strlen(ppgPayload) + strlen(tempStr) < sizeof(ppgPayload)) {
-        strcat(ppgPayload, tempStr);
-        ppgSampleCount++;
-      }
+      appendToPacket(redValue, irValue);
 
-      // store for SpO2
       redBuffer[bufferIndex] = redValue;
       irBuffer[bufferIndex] = irValue;
-      bufferIndex++;
-      if (bufferIndex >= BUFFER_SIZE_LOCAL) { bufferIndex = 0; bufferFull = true; }
+      if (++bufferIndex >= SPO2_WINDOW) { bufferIndex = 0; bufferFull = true; }
 
-      // BPM
-      if (checkForBeat(irValue) == true) {
-        long delta = millis() - lastBeatTime;
-        lastBeatTime = millis();
-        float beatsPerMinute = 60000.0 / delta;
-        if (beatsPerMinute > 40 && beatsPerMinute < 255) {
-          if (beatAvg == 0) beatAvg = beatsPerMinute;
-          else beatAvg = (beatAvg * 0.2) + (beatsPerMinute * 0.8);
-          finalBPM = filter3_BPM((uint8_t)beatAvg);
-        }
-      }
+      updateHeartRate(irValue);
+      updateSpO2();
 
-      // SpO2 calculation
-      if (bufferFull) {
-        static uint8_t spo2CalcCounter = 0;
-        spo2CalcCounter++;
-        if (spo2CalcCounter >= 100) { // 100Hz -> 100 mẫu = 1 giây
-          spo2CalcCounter = 0;
-          
-          uint32_t minRed = redBuffer[0], maxRed = redBuffer[0];
-          uint32_t minIR = irBuffer[0], maxIR = irBuffer[0];
-          for (int i = 1; i < BUFFER_SIZE_LOCAL; i++) {
-            if (redBuffer[i] < minRed) minRed = redBuffer[i];
-            if (redBuffer[i] > maxRed) maxRed = redBuffer[i];
-            if (irBuffer[i] < minIR) minIR = irBuffer[i];
-            if (irBuffer[i] > maxIR) maxIR = irBuffer[i];
-          }
-          long acRed = maxRed - minRed;
-          long dcRed = minRed;
-          long acIR = maxIR - minIR;
-          long dcIR = minIR;
-          if (acIR > 0 && dcRed > 0) {
-            float rValue = ((float)acRed / dcRed) / ((float)acIR / dcIR);
-            float spo2Calculated = 110.0 - (17.0 * rValue);
-            if (spo2Calculated > 100.0) spo2Calculated = 100.0;
-            if (spo2Calculated >= 80.0 && spo2Calculated <= 100.0) {
-              finalSpO2 = filter3_SpO2((uint8_t)spo2Calculated);
-            }
-          }
-        }
-      }
-      
-      // LOG DATA RA SERIAL CHO PYTHON ĐỌC (CSV FORMAT)
-      Serial.printf("%lu,%lu,%lu,%u,%u,%d\n", millis(), (uint32_t)irValue, (uint32_t)redValue, finalBPM, finalSpO2, AccelManager_isMoving() ? 1 : 0);
-      
+#if HS_LOG_PPG_CSV
+      // CSV cho scripts/log_to_csv.py: millis,ir,red,bpm,spo2,motion
+      Serial.printf("%lu,%lu,%lu,%u,%u,%d\n", (unsigned long)millis(), (unsigned long)irValue,
+                    (unsigned long)redValue, finalBPM, finalSpO2, AccelManager_isMoving() ? 1 : 0);
+#endif
     }
     particleSensor.nextSample();
   }
 }
 
 bool PPGManager_popNoFingerEvent() {
-  if (noFingerEventFlag) {
-    noFingerEventFlag = false;
-    return true;
-  }
-  return false;
+  if (!noFingerEventFlag) return false;
+  noFingerEventFlag = false;
+  return true;
 }
 
 long PPGManager_readIR() {
-  // Use library helper to read current IR FIFO or direct IR register
-  // MAX30105 provides getIR() which reads latest sample
   return particleSensor.getIR();
 }
 
 bool PPGManager_popPacket(char* outBuf, size_t bufSize, size_t* outLen) {
-  if (ppgSampleCount >= PPG_PACKET_SIZE_LOCAL) {
-    size_t len = strlen(ppgPayload);
-    if (len >= bufSize) return false;
-    memcpy(outBuf, ppgPayload, len+1);
-    if (outLen) *outLen = len;
-    ppgPayload[0] = '\0';
-    ppgSampleCount = 0;
-    return true;
-  }
-  return false;
+  if (ppgSampleCount < PPG_PACKET_SAMPLES || ppgPayloadLen >= bufSize) return false;
+  memcpy(outBuf, ppgPayload, ppgPayloadLen + 1);
+  if (outLen) *outLen = ppgPayloadLen;
+  PPGManager_discardPacket();
+  return true;
+}
+
+void PPGManager_discardPacket() {
+  ppgPayload[0] = '\0';
+  ppgPayloadLen = 0;
+  ppgSampleCount = 0;
 }
 
 uint8_t PPGManager_getBPM() { return finalBPM; }
 uint8_t PPGManager_getSpO2() { return finalSpO2; }
 
 void PPGManager_setupPhase1() {
-  particleSensor.setup(30, 4, 2, 400, 215, 16384);
-  particleSensor.setPulseAmplitudeRed(85);
-  particleSensor.setPulseAmplitudeIR(85);
+  configureFullPower();
   particleSensor.enableDATARDY();
-  // Clear internal state/buffers
-  bufferIndex = 0;
-  bufferFull = false;
-  finalBPM = 0;
-  finalSpO2 = 0;
-  beatAvg = 0;
+  resetMeasurement();
 }
 
 void PPGManager_setupPhase2(bool lowPower) {
-  if (lowPower) {
-    particleSensor.setup(30, 2, 2, 100, 215, 16384);
-    particleSensor.setPulseAmplitudeRed(5);
-    particleSensor.setPulseAmplitudeIR(75);
-  } else {
-    particleSensor.setup(30, 2, 2, 100, 215, 16384);
-    particleSensor.setPulseAmplitudeRed(75);
-    particleSensor.setPulseAmplitudeIR(75);
-  }
+  // 100Hz, trung bình 2 mẫu; tiết kiệm pin: LED đỏ gần tắt (đã có SpO2 từ pha 1), chỉ cần IR cho nhịp tim
+  particleSensor.setup(30, 2, 2, 100, 215, 16384);
+  particleSensor.setPulseAmplitudeRed(lowPower ? 5 : 75);
+  particleSensor.setPulseAmplitudeIR(75);
   particleSensor.enableDATARDY();
-  // Clear internal state/buffers
-  bufferIndex = 0;
-  bufferFull = false;
-  finalBPM = 0;
-  finalSpO2 = 0;
-  beatAvg = 0;
+  resetMeasurement();
 }
-
