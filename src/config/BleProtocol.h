@@ -1,7 +1,9 @@
 // Giao thức BLE giữa thiết bị và ứng dụng điện thoại. App phải dùng đúng các chuỗi / UUID này.
 #pragma once
 
-// ---- Service / characteristic ----
+// ====================
+// Service / characteristic
+// ====================
 #define BLE_DEVICE_NAME_PREFIX   "HuyWatch_"  // App quét theo tiền tố này; tên đầy đủ thêm 2 byte cuối MAC
 #define BLE_SERVICE_UUID         "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define BLE_DATA_CHAR_UUID       "beb5483e-36e1-4688-b7f5-ea07361b26a8"  // NOTIFY: PPG thô + sự kiện (CMD:/ACK:/ERR:)
@@ -10,7 +12,9 @@
 #define BLE_BATTERY_SERVICE_UUID 0x180F  // Battery Service chuẩn Bluetooth SIG
 #define BLE_BATTERY_LEVEL_UUID   0x2A19
 
-// ---- Lệnh điện thoại -> thiết bị (characteristic WRITE, bỏ \r\n cuối) ----
+// ====================
+// Lệnh điện thoại -> thiết bị (characteristic WRITE, bỏ \r\n cuối)
+// ====================
 #define CMD_START_MEASURE    "CMD:START_MEASURE"
 #define CMD_START_WORKOUT    "CMD:START_WORKOUT"
 #define CMD_WORKOUT_START    "CMD:WORKOUT_START"   // Tên cũ của START_WORKOUT, vẫn nhận
@@ -20,7 +24,9 @@
 #define CMD_START_SCREENING  "CMD:START_SCREENING"
 #define CMD_IDLE             "CMD:IDLE"
 
-// ---- Sự kiện thiết bị -> điện thoại (characteristic DATA) ----
+// ====================
+// Sự kiện thiết bị -> điện thoại (characteristic DATA)
+// ====================
 #define EVT_MSG_MOTION            "CMD:MOTION\n"
 #define EVT_MSG_NOT_WEARING       "CMD:NOT_WEARING\n"
 #define EVT_MSG_START_SCREENING   "CMD:START_SCREENING\n"
@@ -30,7 +36,9 @@
 #define ERR_WORKOUT_IN_PROGRESS   "ERR:WORKOUT_IN_PROGRESS\n"
 #define ERR_WORKOUT_COOLDOWN      "ERR:WORKOUT_COOLDOWN\n"
 
-// ---- Định dạng gói dữ liệu ----
+// ====================
+// Định dạng gói dữ liệu
+// ====================
 // DATA:   millis,red,ir,bpm,spo2\n (gom 10 mẫu / gói) khi MEASURE / SCREENING
 #define FMT_PPG_SAMPLE    "%lu,%lu,%lu,%u,%u\n"
 // REPORT: trung bình pha 1 / các pha phụ của chu kỳ sàng lọc AFib

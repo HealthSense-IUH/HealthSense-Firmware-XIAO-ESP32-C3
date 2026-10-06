@@ -2,6 +2,9 @@
 #include <Adafruit_NeoPixel.h>
 #include <Arduino.h>
 
+// ====================
+// Điều khiển màu LED trạng thái
+// ====================
 static Adafruit_NeoPixel* pixelsPtr = nullptr;
 
 static void showColor(uint8_t r, uint8_t g, uint8_t b) {
@@ -10,6 +13,9 @@ static void showColor(uint8_t r, uint8_t g, uint8_t b) {
   pixelsPtr->show();
 }
 
+// ====================
+// Cấp nguồn MPU6050 và khởi tạo LED
+// ====================
 void DisplayPower_begin(uint8_t accelVddPin, uint8_t ledPin) {
   // Cấp nguồn cho MPU6050 trước khi khởi tạo cảm biến
   pinMode(accelVddPin, OUTPUT);
@@ -21,6 +27,9 @@ void DisplayPower_begin(uint8_t accelVddPin, uint8_t ledPin) {
   DisplayPower_showOn();
 }
 
+// ====================
+// Hiển thị trạng thái bật, tắt và shutdown
+// ====================
 void DisplayPower_showOn() {
   showColor(0, 225, 0);
 }

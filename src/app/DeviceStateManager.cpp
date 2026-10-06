@@ -7,6 +7,9 @@
 #include "drivers/DisplayPower.h"
 #include "drivers/PPGManager.h"
 
+// ====================
+// Trạng thái chế độ, nút bấm và thời gian hồi phục
+// ====================
 static DeviceMode currentMode = MODE_IDLE;
 static DeviceMode pendingMode = MODE_IDLE;
 static uint8_t wakeButtonPin;
@@ -29,7 +32,9 @@ static void enterMode(DeviceMode mode);
 static void exitMode(DeviceMode mode);
 static void requestMode(DeviceMode newMode);
 
-// ---- Lệnh từ điện thoại ----
+// ====================
+// Lệnh từ điện thoại
+// ====================
 
 static void onBLECommand(const char* cmd) {
   if (strcmp(cmd, CMD_START_MEASURE) == 0) {
@@ -58,6 +63,9 @@ static void onBLECommand(const char* cmd) {
   }
 }
 
+// ====================
+// Hồi phục sau tập và dò đeo tay khi IDLE
+// ====================
 static bool inWorkoutCooldown() {
   return lastWorkoutEndTime > 0 && (millis() - lastWorkoutEndTime < WORKOUT_COOLDOWN_MS);
 }
@@ -81,7 +89,9 @@ static void idleLoop() {
   }
 }
 
-// ---- API ----
+// ====================
+// API
+// ====================
 
 void DeviceStateManager_begin(uint8_t buttonPin, uint8_t accelVdd) {
   currentMode = MODE_TURN_ON;
@@ -113,6 +123,9 @@ void DeviceStateManager_handleButton() {
   }
 }
 
+// ====================
+// Xử lý sự kiện thiết bị
+// ====================
 static void flashLED() {
   DisplayPower_showOn();
   isLEDOn = true;
@@ -183,6 +196,9 @@ void DeviceStateManager_onEvent(DeviceEvent event) {
   }
 }
 
+// ====================
+// Vòng lặp và chuyển đổi chế độ
+// ====================
 void DeviceStateManager_loop() {
   if (pendingMode != currentMode) {
     exitMode(currentMode);

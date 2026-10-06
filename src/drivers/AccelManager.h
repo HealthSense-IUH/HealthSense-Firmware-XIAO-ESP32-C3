@@ -8,7 +8,7 @@ bool AccelManager_begin(uint8_t intPin);
 bool AccelManager_isMoving();
 // true một lần cho mỗi ngắt chuyển động (đồng thời nhả chân INT đang chốt)
 bool AccelManager_popMotionEvent();
-// Gọi mỗi vòng loop: lấy mẫu đếm bước 25Hz
+// Gọi mỗi vòng loop: đếm bước 25Hz; thử té ngã 100Hz nếu HS_FALL_TEST_ENABLED.
 void AccelManager_process();
 void AccelManager_printDebug();
 void AccelManager_setMotionThreshold(uint8_t threshold);

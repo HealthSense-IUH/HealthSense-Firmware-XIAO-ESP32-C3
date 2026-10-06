@@ -6,6 +6,9 @@
 #include "config/BleProtocol.h"
 #include "config/config.h"
 
+// ====================
+// Trạng thái cảm biến và bộ đệm PPG
+// ====================
 static MAX30105 particleSensor;
 static volatile bool dataReady = false;
 
@@ -33,6 +36,9 @@ static unsigned long noFingerStartTime = 0;
 static bool noFingerEventFlag = false;
 
 // Lọc trung vị 3 mẫu gần nhất để bỏ giá trị nhảy vọt
+// ====================
+// Bộ lọc trung vị cho BPM và SpO2
+// ====================
 struct Median3 {
   uint8_t v[3] = {0, 0, 0};
   uint8_t push(uint8_t value) {
@@ -46,6 +52,9 @@ struct Median3 {
 static Median3 bpmFilter;
 static Median3 spo2Filter;
 
+// ====================
+// Ngắt dữ liệu và khởi tạo MAX30102
+// ====================
 static void IRAM_ATTR onDataReady() {
   dataReady = true;
 }
@@ -96,6 +105,9 @@ void PPGManager_shutDown() {
 }
 
 /** Thêm một mẫu vào gói BLE đang gom (bỏ mẫu nếu gói đã đầy). */
+// ====================
+// Gom mẫu PPG thành gói BLE
+// ====================
 static void appendToPacket(long redValue, long irValue) {
   char sample[64];
   int len = snprintf(sample, sizeof(sample), FMT_PPG_SAMPLE, (unsigned long)millis(),
@@ -108,6 +120,9 @@ static void appendToPacket(long redValue, long irValue) {
 }
 
 /** BPM từ khoảng cách giữa 2 nhịp, làm mượt rồi lọc trung vị. */
+// ====================
+// Tính nhịp tim BPM
+// ====================
 static void updateHeartRate(long irValue) {
   if (!checkForBeat(irValue)) return;
   long delta = millis() - lastBeatTime;
@@ -120,6 +135,9 @@ static void updateHeartRate(long irValue) {
 }
 
 /** SpO2 theo tỷ số R = (AC/DC đỏ) / (AC/DC hồng ngoại) trên cửa sổ gần nhất, tính lại mỗi giây. */
+// ====================
+// Tính SpO2 từ tín hiệu đỏ và hồng ngoại
+// ====================
 static void updateSpO2() {
   static uint8_t recalcCounter = 0;
   if (!bufferFull || ++recalcCounter < SPO2_RECALC_EVERY) return;
@@ -145,6 +163,9 @@ static void updateSpO2() {
   if (spo2 >= 80.0) finalSpO2 = spo2Filter.push((uint8_t)spo2);
 }
 
+// ====================
+// Đọc FIFO và phát hiện tháo thiết bị
+// ====================
 void PPGManager_process() {
   if (!dataReady) return;
   dataReady = false;
@@ -187,6 +208,9 @@ void PPGManager_process() {
   }
 }
 
+// ====================
+// Truy xuất sự kiện, kết quả đo và gói dữ liệu
+// ====================
 bool PPGManager_popNoFingerEvent() {
   if (!noFingerEventFlag) return false;
   noFingerEventFlag = false;
@@ -214,6 +238,9 @@ void PPGManager_discardPacket() {
 uint8_t PPGManager_getBPM() { return finalBPM; }
 uint8_t PPGManager_getSpO2() { return finalSpO2; }
 
+// ====================
+// Cấu hình cảm biến theo pha sàng lọc
+// ====================
 void PPGManager_setupPhase1() {
   configureFullPower();
   particleSensor.enableDATARDY();

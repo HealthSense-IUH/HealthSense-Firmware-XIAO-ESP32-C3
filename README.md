@@ -64,6 +64,26 @@ BLE (chi tiết trong `BleProtocol.h`): một service với 3 characteristic DAT
 3. Kết nối board XIAO ESP32C3 với máy tính.
 4. Nhấn nút **Build** và **Upload** trên thanh công cụ của PlatformIO.
 
+### Thử phát hiện té ngã qua Serial
+`HS_FALL_TEST_ENABLED=1` trong `src/config/config.h` bật gyroscope và lấy mẫu MPU6050
+100Hz; bộ đếm bước vẫn cập nhật 25Hz. Nạp firmware mới rồi mở Serial Monitor ở
+115200 baud trên cổng USB của board (hiện tại COM5, có thể đổi khi cắm lại).
+Không cần kết nối ứng dụng điện thoại.
+
+Log `[FALL-DATA]` mỗi 500ms hiển thị độ lớn gia tốc (g), tốc độ xoay (độ/giây)
+và trạng thái. Thuật toán thử nghiệm tìm gia tốc vượt 2g, xoay ít nhất 150 độ/giây
+trong khoảng 500ms trước hoặc 1000ms sau va chạm, rồi ít chuyển động liên tục
+3 giây trong thời hạn 8 giây kể từ va chạm. Khi đó in `[FALL] SUSPECTED` và chờ
+10 giây trước lần phát hiện tiếp theo. Chỉ ghi Serial, chưa gửi cảnh báo qua BLE.
+
+Để xem tín hiệu, chuyển động/xoay thiết bị khi đang ngồi rồi giữ yên trên đệm;
+không cần tự ngã hoặc đập thiết bị. Một chuyển động nhẹ có thể không vượt ngưỡng.
+Đây là bản thử ngưỡng trên cổ tay, có thể báo nhầm hoặc bỏ sót; các ngưỡng nằm
+trong nhóm `FALL_*` của `config.h` để điều chỉnh theo log.
+Khi bật bản thử, CSV PPG trên Serial mặc định tắt để dễ đọc log. Đặt
+`HS_FALL_TEST_ENABLED=0` rồi nạp lại để tắt gyroscope và trở về chế độ log trước đó;
+có thể đặt riêng `HS_LOG_PPG_CSV=1` nếu cần ghi CSV trong lúc thử.
+
 ---
 
 ## English

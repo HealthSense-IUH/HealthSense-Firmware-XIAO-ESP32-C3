@@ -7,6 +7,9 @@
 #include <BLE2902.h>
 #include <esp_mac.h>
 
+// ====================
+// Trạng thái kết nối và các characteristic BLE
+// ====================
 static BLECharacteristic* pCharacteristic = nullptr;        // NOTIFY: PPG thô + sự kiện
 static BLECharacteristic* pReportCharacteristic = nullptr;  // NOTIFY: báo cáo vitals, dữ liệu offline
 static BLECharacteristic* pBatteryCharacteristic = nullptr; // READ | NOTIFY: mức pin (0x2A19)
@@ -18,7 +21,9 @@ static volatile unsigned long connectedAt = 0;
 // Hàm xử lý lệnh từ điện thoại, do DeviceStateManager đăng ký
 static void (*commandCallback)(const char* cmd) = nullptr;
 
-// ---- Pin ----
+// ====================
+// Pin
+// ====================
 
 static uint8_t readBatteryLevel() {
   // Cầu phân áp 2 x 100K: điện áp pin = 2 x điện áp tại chân ADC
@@ -36,7 +41,9 @@ void BLEManager_updateBatteryLevel() {
   if (deviceConnected) pBatteryCharacteristic->notify();
 }
 
-// ---- Bộ đệm offline: mẫu tập luyện ghi lại khi mất kết nối, gửi bù khi kết nối lại ----
+// ====================
+// Bộ đệm offline: mẫu tập luyện ghi lại khi mất kết nối, gửi bù khi kết nối lại
+// ====================
 
 struct OfflineSample {
   uint32_t timestampMs;
@@ -95,7 +102,9 @@ static void resyncOfflineSamples() {
   lastResyncSend = now;
 }
 
-// ---- Callback BLE ----
+// ====================
+// Callback BLE
+// ====================
 
 class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer*) {
@@ -124,6 +133,9 @@ class WriteCallbacks : public BLECharacteristicCallbacks {
   }
 };
 
+// ====================
+// Khởi tạo dịch vụ BLE và quảng bá thiết bị
+// ====================
 void BLEManager_begin() {
   uint8_t mac[6];
   esp_read_mac(mac, ESP_MAC_WIFI_STA);
@@ -166,6 +178,9 @@ void BLEManager_begin() {
   BLEDevice::startAdvertising();
 }
 
+// ====================
+// API gửi dữ liệu, sự kiện và đồng bộ offline
+// ====================
 void BLEManager_loop() {
   resyncOfflineSamples();
 }

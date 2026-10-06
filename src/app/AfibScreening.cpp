@@ -13,6 +13,9 @@
  * hỏng cả 3 lần hoặc không còn đủ 60s trước mốc 150s thì bỏ SpO2 của chu kỳ, các pha sau đo cả SpO2.
  * Giá trị enum giữ như bản cũ: pha đo phụ là số lẻ, pha chờ trước nó là số chẵn liền trước.
  */
+// ====================
+// Các pha và thông số chu kỳ sàng lọc
+// ====================
 enum ScreeningPhase : uint8_t {
   PHASE_NONE = 0,
   PHASE1_MEASURE = 1,
@@ -49,6 +52,9 @@ static unsigned long spo2Sum = 0;
 static unsigned long validSampleCount = 0;
 static unsigned long lastSampleAccumTime = 0;
 
+// ====================
+// Khởi tạo pha đo và điều phối thời gian chờ
+// ====================
 static void resetAccumulator() {
   bpmSum = 0;
   spo2Sum = 0;
@@ -81,6 +87,9 @@ static void startCycle() {
   startMeasurePhase(PHASE1_MEASURE);
 }
 
+// ====================
+// Gửi báo cáo và tính trung bình sinh hiệu
+// ====================
 static void sendReport(const char* format, uint8_t bpm, uint8_t spo2) {
   if (!BLEManager_isConnected()) return;
   char report[32];
@@ -116,6 +125,9 @@ static uint8_t averageSpO2() {
 }
 
 /** Rung tay giữa pha 1: tắt cảm biến, ngủ 30s rồi đo lại; quá 3 lần thì bỏ SpO2 và chờ pha 2. */
+// ====================
+// Xử lý rung tay, kết thúc pha và thử đo lại
+// ====================
 static void onPhase1Motion() {
   Serial.println("[SCREENING] Phát hiện chuyển động! Ngừng đo Pha 1 và thử lại chớp nhoáng...");
 
@@ -188,6 +200,9 @@ static void finishRetrySleep() {
   }
 }
 
+// ====================
+// Vòng lặp chu kỳ sàng lọc AFib
+// ====================
 void AfibScreening_loop() {
   unsigned long now = millis();
   switch (screeningPhase) {
@@ -229,6 +244,9 @@ void AfibScreening_loop() {
   }
 }
 
+// ====================
+// API bắt đầu, dừng và báo chuyển động
+// ====================
 void AfibScreening_start() {
   phase1AvgSpO2 = 0;
   startCycle();

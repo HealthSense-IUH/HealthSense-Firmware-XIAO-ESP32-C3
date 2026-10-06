@@ -9,6 +9,9 @@
 #include "comm/BLEManager.h"
 #include "app/DeviceStateManager.h"
 
+// ====================
+// Deep sleep và đánh thức bằng nút bấm
+// ====================
 static void goToDeepSleep() {
   esp_deep_sleep_enable_gpio_wakeup(1ULL << BUTTON_PIN, ESP_GPIO_WAKEUP_GPIO_LOW);
   esp_deep_sleep_start();
@@ -24,6 +27,9 @@ static void requireLongPressToWake() {
   }
 }
 
+// ====================
+// Khởi tạo phần cứng và các module
+// ====================
 void setup() {
   setCpuFrequencyMhz(CPU_FREQ_MHZ);
   Serial.begin(115200);
@@ -48,6 +54,9 @@ void setup() {
 }
 
 /** WORKOUT: gom BPM + bước chân gửi mỗi 3 giây (mất kết nối thì ghi đệm), không gửi PPG thô. */
+// ====================
+// Gửi BPM và số bước khi tập luyện
+// ====================
 static void streamWorkout() {
   static unsigned long lastVitalsSend = 0;
   if (millis() - lastVitalsSend >= WORKOUT_VITALS_INTERVAL_MS) {
@@ -68,6 +77,9 @@ static void streamWorkout() {
 }
 
 /** MEASURE / SCREENING: gửi PPG thô theo gói 10 mẫu (millis,red,ir,bpm,spo2). */
+// ====================
+// Gửi tín hiệu PPG qua BLE
+// ====================
 static void streamPPG() {
   char packet[512];
   size_t len = 0;
@@ -76,6 +88,9 @@ static void streamPPG() {
   }
 }
 
+// ====================
+// Vòng lặp điều phối thiết bị
+// ====================
 void loop() {
   DeviceStateManager_handleButton();
 
