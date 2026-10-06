@@ -140,7 +140,7 @@ static void updateSpO2() {
   if (acIR <= 0 || dcRed <= 0) return;
 
   float rValue = ((float)acRed / dcRed) / ((float)acIR / dcIR);
-  float spo2 = 110.0 - (17.0 * rValue);
+  float spo2 = -45.060f * rValue * rValue + 30.354f * rValue + 94.845f;
   if (spo2 > 100.0) spo2 = 100.0;
   if (spo2 >= 80.0) finalSpO2 = spo2Filter.push((uint8_t)spo2);
 }
