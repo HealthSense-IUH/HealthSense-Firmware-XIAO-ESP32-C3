@@ -9,6 +9,7 @@ enum DeviceMode {
   MODE_MEASURE,    // Đo chủ động theo lệnh điện thoại: gửi PPG thô
   MODE_WORKOUT,    // Tập luyện: gửi BPM + bước chân mỗi 3 giây, ghi đệm khi mất kết nối
   MODE_SCREENING,  // Sàng lọc AFib theo chu kỳ 10 phút: gửi PPG thô + báo cáo R1/R2
+  MODE_EMERGENCY,  // Khẩn cấp: té ngã, đếm ngược SOS, gửi cảnh báo BLE
   MODE_SHUTDOWN,   // Tắt máy: deep sleep, giữ nút 3 giây để bật lại
   MODE_TURN_ON     // Vừa bật: nháy LED rồi về IDLE
 };
@@ -18,13 +19,17 @@ enum DeviceEvent {
   EVT_BUTTON_LONG,
   EVT_MOTION,
   EVT_NOT_WEARING,
+  EVT_FALL_DETECTED,
+  EVT_BLE_CANCEL_SOS,
   EVT_BLE_START_MEASURE,
   EVT_BLE_START_WORKOUT,
-  EVT_BLE_START_SCREENING
+  EVT_BLE_START_SCREENING,
+  EVT_BLE_TEST_SOS
 };
 
 void DeviceStateManager_begin(uint8_t buttonPin, uint8_t accelVddPin);
 void DeviceStateManager_handleButton();
+void DeviceStateManager_handleBLECommand(const char* cmd);
 void DeviceStateManager_onEvent(DeviceEvent event);
 void DeviceStateManager_loop();
 DeviceMode DeviceStateManager_getMode();

@@ -97,6 +97,10 @@ void loop() {
   AccelManager_process();
   AccelManager_printDebug();
   if (AccelManager_popMotionEvent()) DeviceStateManager_onEvent(EVT_MOTION);
+  if (AccelManager_popFallEvent()) {
+    Serial.println("[MAIN] >>> TE NGA XAC NHAN (FALL DETECTED)! <<<");
+    DeviceStateManager_onEvent(EVT_FALL_DETECTED);
+  }
 
   PPGManager_process();
   if (PPGManager_popNoFingerEvent()) {
@@ -111,6 +115,9 @@ void loop() {
     case MODE_MEASURE:
     case MODE_SCREENING:
       streamPPG();
+      break;
+    case MODE_EMERGENCY:
+      PPGManager_discardPacket();
       break;
     default:
       break;  // IDLE / SHUTDOWN / TURN_ON: không gửi dữ liệu

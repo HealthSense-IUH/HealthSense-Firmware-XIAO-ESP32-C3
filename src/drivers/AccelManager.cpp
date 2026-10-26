@@ -22,22 +22,29 @@ static unsigned long lastStepTime = 0;
 static float prevAccelMag = 9.81f;
 
 // ====================
-// Trạng thái phát hiện té ngã thử nghiệm
+// Trạng thái phát hiện té ngã 3 giai đoạn (Chuẩn logic từ XIAO-nRF52840)
+// Giai đoạn 1: Free-fall (Rơi tự do: gia tốc tổng < 0.35g trong >= 20ms)
+// Giai đoạn 2: Impact (Va chạm: gia tốc tổng >= 1.8g trong vòng 600ms sau rơi)
+// Giai đoạn 3: Immobility (Bất động tối thiểu 1.5s sau va chạm; loại bỏ báo động giả khi vung tay/chạy bộ)
 // ====================
 #if HS_FALL_TEST_ENABLED
-enum FallTestState : uint8_t { FALL_IDLE, FALL_WAIT_ROTATION, FALL_WAIT_STILL, FALL_COOLDOWN };
-static FallTestState fallState = FALL_IDLE;
-static unsigned long fallCandidateTime = 0;
-static unsigned long lastRotationTime = 0;
-static bool hasRecentRotation = false;
-static unsigned long stillStartTime = 0;
-static bool trackingStillness = false;
-static unsigned long lastFallSampleTime = 0;
-static bool hasFallSample = false;
-static unsigned long fallCooldownTime = 0;
-static float lastFallAccelG = 1.0f;
-static float lastFallRotationDps = 0.0f;
-static bool wasAboveImpact = false;
+enum FallCheckState : uint8_t {
+  FALL_STATE_IDLE = 0,
+  FALL_STATE_WAIT_IMPACT,
+  FALL_STATE_WAIT_IMMOBILITY
+};
+
+static FallCheckState fallState = FALL_STATE_IDLE;
+static unsigned long fallStateStartMs = 0;
+static unsigned long impactDetectedAt = 0;
+static unsigned long fallLastSampleMs = 0;
+static float fallPrevAx = 0.0f;
+static float fallPrevAy = 0.0f;
+static float fallPrevAz = 0.0f;
+static uint8_t freeFallSampleCount = 0;
+static volatile bool fallEventFlag = false;
+static bool fallDetectionEnabled = true;
+static uint8_t fallMotionStreak = 0;
 #endif
 
 // ISR phải nằm trong IRAM trên ESP32 và chạy thật nhanh: chỉ bật cờ
@@ -55,8 +62,8 @@ bool AccelManager_begin(uint8_t intPin) {
   }
   mpuReady = true;
 
-  // Lọc thông cao: bỏ thành phần trọng lực, chỉ giữ cử động
-  mpu.setHighPassFilter(MPU6050_HIGHPASS_0_63_HZ);
+  // Tắt lọc thông cao để giữ nguyên thành phần trọng lực 1g (cần thiết cho phát hiện rơi tự do 0g)
+  mpu.setHighPassFilter(MPU6050_HIGHPASS_DISABLE);
   // Ngưỡng (1-255) và thời gian tối thiểu (ms) của một lần vung tay; ngưỡng đổi theo chế độ qua setMotionThreshold
   mpu.setMotionDetectionThreshold(MOTION_THRESHOLD_MEASURE);
   mpu.setMotionDetectionDuration(20);
@@ -64,13 +71,8 @@ bool AccelManager_begin(uint8_t intPin) {
   mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
   // Lọc thông thấp phần cứng 21Hz
   mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-  // Bật con quay chỉ khi thử té ngã; cảm biến nhiệt vẫn ngủ.
-#if HS_FALL_TEST_ENABLED
-  mpu.setGyroStandby(false, false, false);
-  mpu.setGyroRange(MPU6050_RANGE_1000_DEG);
-#else
+  // Không dùng con quay và cảm biến nhiệt: cho ngủ để tiết kiệm pin tối đa
   mpu.setGyroStandby(true, true, true);
-#endif
   mpu.setTemperatureStandby(true);
 
   // Chân INT: chốt mức, active-high, báo khi có chuyển động
@@ -83,8 +85,8 @@ bool AccelManager_begin(uint8_t intPin) {
 
   Serial.println("MPU6050 OK và đã bật Ngắt chuyển động!");
 #if HS_FALL_TEST_ENABLED
-  Serial.printf("[FALL] TEST ENABLED: impact >= %.2fg + rotation >= %.1fdeg/s + still %lums. Serial only.\n",
-                FALL_IMPACT_G, FALL_ROTATION_DPS, FALL_STILL_MS);
+  Serial.printf("[FALL] 3-STAGE FALL DETECTION ARMED: FreeFall < %.2fg -> Impact >= %.2fg (600ms) -> Stillness %lums\n",
+                FALL_FREE_FALL_G, FALL_IMPACT_G, FALL_IMMOBILITY_WINDOW_MS);
 #endif
   return true;
 }
@@ -111,6 +113,49 @@ uint32_t AccelManager_getStepCount() {
   return stepCount;
 }
 
+// ====================
+// Truy xuất sự kiện và điều khiển phát hiện té ngã
+// ====================
+bool AccelManager_popFallEvent() {
+#if HS_FALL_TEST_ENABLED
+  bool fallEvent = false;
+  noInterrupts();
+  if (fallEventFlag) {
+    fallEvent = true;
+    fallEventFlag = false;
+  }
+  interrupts();
+  return fallEvent;
+#else
+  return false;
+#endif
+}
+
+void AccelManager_startFallDetection() {
+#if HS_FALL_TEST_ENABLED
+  fallDetectionEnabled = true;
+  fallState = FALL_STATE_IDLE;
+  freeFallSampleCount = 0;
+  Serial.println("[ACCEL] Fall detection armed");
+#endif
+}
+
+void AccelManager_stopFallDetection() {
+#if HS_FALL_TEST_ENABLED
+  fallDetectionEnabled = false;
+  fallState = FALL_STATE_IDLE;
+  freeFallSampleCount = 0;
+#endif
+}
+
+bool AccelManager_isFallDetectionEnabled() {
+#if HS_FALL_TEST_ENABLED
+  return fallDetectionEnabled;
+#else
+  return false;
+#endif
+}
+
 /** Lấy mẫu gia tốc 25Hz và đếm bước. */
 // ====================
 // Tính độ lớn gia tốc và đếm bước chân
@@ -128,82 +173,107 @@ static void updatePedometer(float mag, unsigned long now) {
 }
 
 // ====================
-// Chuỗi va chạm, xoay nhanh và ít chuyển động
+// Thuật toán phát hiện té ngã 3 giai đoạn (Free-fall -> Impact -> Immobility)
+// Đồng bộ logic chuẩn từ XIAO-nRF52840
 // ====================
 #if HS_FALL_TEST_ENABLED
-/** Ngưỡng thử nghiệm trên cổ tay; không bắt buộc pha rơi tự do, không kết luận chẩn đoán. */
-static void updateFallDetection(float accelG, float rotationDps, unsigned long now) {
-  lastFallAccelG = accelG;
-  lastFallRotationDps = rotationDps;
-  bool sampleGap = hasFallSample && now - lastFallSampleTime > FALL_MAX_SAMPLE_GAP_MS;
-  lastFallSampleTime = now;
-  hasFallSample = true;
-  if (sampleGap || !isfinite(accelG) || !isfinite(rotationDps)) {
-    trackingStillness = false;
-    hasRecentRotation = false;
-  }
-  if (!isfinite(accelG) || !isfinite(rotationDps)) return;
-
-  bool impact = accelG >= FALL_IMPACT_G;
-  bool impactRising = impact && !wasAboveImpact;
-  wasAboveImpact = impact;
-  if (rotationDps >= FALL_ROTATION_DPS) {
-    lastRotationTime = now;
-    hasRecentRotation = true;
+static void updateFallDetection(const sensors_event_t &a, float gMag, unsigned long now) {
+  if (!fallDetectionEnabled) {
+    fallState = FALL_STATE_IDLE;
+    freeFallSampleCount = 0;
+    return;
   }
 
-  if (fallState == FALL_COOLDOWN) {
-    if (now - fallCooldownTime >= FALL_COOLDOWN_MS) {
-      fallState = FALL_IDLE;
-      Serial.println("[FALL] READY");
+  // --- GIAI ĐOẠN 1: Phát hiện rơi tự do (Free-fall) ---
+  // Khi rơi tự do, trọng lượng biểu kiến giảm mạnh (gMag < 0.35g liên tục >= 2 mẫu / 20ms)
+  if (gMag <= FALL_FREE_FALL_G) {
+    freeFallSampleCount++;
+    if (freeFallSampleCount >= FALL_FREE_FALL_MIN_SAMPLES) {
+      if (fallState == FALL_STATE_IDLE || fallState == FALL_STATE_WAIT_IMPACT) {
+        fallState = FALL_STATE_WAIT_IMPACT;
+        fallStateStartMs = now;
+        Serial.println("[ACCEL] Giai doan 1: Free-fall detected -> Cho va cham (WAIT_IMPACT)");
+      }
+    }
+  } else {
+    freeFallSampleCount = 0;
+  }
+
+  if (fallState == FALL_STATE_IDLE) {
+    return;
+  }
+
+  // --- GIAI ĐOẠN 2: Chờ va chạm mặt sàn (Impact Detection trong 600ms) ---
+  if (fallState == FALL_STATE_WAIT_IMPACT) {
+    // Quá thời gian 600ms mà không có va chạm -> Cú rơi giả / an toàn
+    if (now - fallStateStartMs > FALL_IMPACT_TIMEOUT_MS) {
+      fallState = FALL_STATE_IDLE;
+      fallMotionStreak = 0;
+      Serial.println("[ACCEL] Giai doan 2: Khong co va cham sau 600ms -> Bo qua");
+    } else if (gMag >= FALL_IMPACT_G) {
+      // Va chạm: gia tốc tổng >= 1.8g
+      fallState = FALL_STATE_WAIT_IMMOBILITY;
+      impactDetectedAt = now;
+      fallLastSampleMs = now;
+      fallPrevAx = a.acceleration.x;
+      fallPrevAy = a.acceleration.y;
+      fallPrevAz = a.acceleration.z;
+      fallMotionStreak = 0;
+      Serial.printf("[ACCEL] Giai doan 2: Phat hien va cham (gMag=%.2f) -> Cho bat dong (WAIT_IMMOBILITY)\n", gMag);
     }
     return;
   }
 
-  if (fallState == FALL_IDLE) {
-    if (!impactRising) return;
-    fallCandidateTime = now;
-    trackingStillness = false;
-    bool rotated = hasRecentRotation && now - lastRotationTime <= FALL_ROTATION_BEFORE_MS;
-    fallState = rotated ? FALL_WAIT_STILL : FALL_WAIT_ROTATION;
-    Serial.printf("[FALL] IMPACT: A=%.2fg W=%.1fdeg/s; %s\n", accelG, rotationDps,
-                  rotated ? "rotation found, waiting for stillness" : "waiting for rotation");
-    return;
-  }
+  // --- GIAI ĐOẠN 3: Chờ bất động (Immobility Window) ---
+  if (fallState == FALL_STATE_WAIT_IMMOBILITY) {
+    unsigned long timeSinceImpact = now - impactDetectedAt;
 
-  if (fallState == FALL_WAIT_ROTATION) {
-    if (now - fallCandidateTime > FALL_ROTATION_AFTER_MS) {
-      fallState = FALL_IDLE;
-      Serial.println("[FALL] REJECTED: no fast rotation near impact");
-      return;
-    }
-    if (rotationDps >= FALL_ROTATION_DPS) {
-      fallState = FALL_WAIT_STILL;
-      Serial.printf("[FALL] ROTATION: waiting for %lums of stillness\n", FALL_STILL_MS);
-    }
-    return;
-  }
+    // Trong FALL_SETTLE_MS (500ms) đầu tiên sau va chạm: giai đoạn nảy đập cơ học / hấp thụ xung lực,
+    // liên tục cập nhật mẫu gia tốc baseline mà không bắt lỗi cử động
+    if (timeSinceImpact < FALL_SETTLE_MS) {
+      fallPrevAx = a.acceleration.x;
+      fallPrevAy = a.acceleration.y;
+      fallPrevAz = a.acceleration.z;
+      fallLastSampleMs = now;
+      fallMotionStreak = 0;
+    } else {
+      // Sau thời gian rung chấn: kiểm tra cử động định kỳ mỗi 50ms
+      if (now - fallLastSampleMs >= FALL_SAMPLE_INTERVAL_MS) {
+        fallLastSampleMs = now;
+        float delta = fabsf(a.acceleration.x - fallPrevAx) +
+                      fabsf(a.acceleration.y - fallPrevAy) +
+                      fabsf(a.acceleration.z - fallPrevAz);
+        fallPrevAx = a.acceleration.x;
+        fallPrevAy = a.acceleration.y;
+        fallPrevAz = a.acceleration.z;
 
-  if (now - fallCandidateTime > FALL_CONFIRM_TIMEOUT_MS) {
-    fallState = FALL_IDLE;
-    trackingStillness = false;
-    Serial.println("[FALL] REJECTED: no continuous stillness before timeout");
-    return;
-  }
-  bool still = fabsf(accelG - 1.0f) <= FALL_STILL_G_TOLERANCE && rotationDps <= FALL_STILL_DPS;
-  if (!still) {
-    trackingStillness = false;
-    return;
-  }
-  if (!trackingStillness) {
-    trackingStillness = true;
-    stillStartTime = now;
-  }
-  if (now - stillStartTime >= FALL_STILL_MS) {
-    Serial.println("[FALL] SUSPECTED: impact + rotation + stillness. Experimental, Serial only.");
-    fallState = FALL_COOLDOWN;
-    fallCooldownTime = now;
-    trackingStillness = false;
+        if (delta > FALL_MOTION_DELTA_THRESH) {
+          fallMotionStreak++;
+          Serial.printf("[ACCEL] Giai doan 3: Cu dong nhe (delta=%.2f m/s2, streak=%u/%u)\n",
+                        delta, fallMotionStreak, FALL_MOTION_STREAK_THRESH);
+
+          // Chỉ khi cử động liên tục >= 4 mẫu (~200ms) chứng tỏ người dùng đang hoạt động bình thường / đứng dậy
+          if (fallMotionStreak >= FALL_MOTION_STREAK_THRESH) {
+            fallState = FALL_STATE_IDLE;
+            fallMotionStreak = 0;
+            Serial.printf("[ACCEL] Giai doan 3: Phat hien hoat dong lien tuc (streak>=%u) -> Huy bao dong (Nguoi dung van hoat dong)\n", FALL_MOTION_STREAK_THRESH);
+            return;
+          }
+        } else {
+          // Lắng xuống: giảm streak dần
+          if (fallMotionStreak > 0) fallMotionStreak--;
+        }
+      }
+
+      // Nếu đã qua đủ thời gian kiểm tra bất động (FALL_SETTLE_MS + FALL_IMMOBILITY_WINDOW_MS)
+      // mà không bị hủy bởi chuỗi cử động liên tục -> Xác nhận té ngã thật sự!
+      if (timeSinceImpact >= (FALL_SETTLE_MS + FALL_IMMOBILITY_WINDOW_MS)) {
+        fallEventFlag = true;
+        fallState = FALL_STATE_IDLE;
+        fallMotionStreak = 0;
+        Serial.println("[ACCEL] Giai doan 3: Xac nhan bat dong -> TE NGA XAC NHAN! (fallEventFlag=1)");
+      }
+    }
   }
 }
 #endif
@@ -232,15 +302,15 @@ void AccelManager_process() {
     updatePedometer(mag, now);
   }
 #if HS_FALL_TEST_ENABLED
-  // Adafruit trả gia tốc m/s² và tốc độ xoay rad/s.
-  float rotationDps = sqrtf(g.gyro.x * g.gyro.x + g.gyro.y * g.gyro.y + g.gyro.z * g.gyro.z) * RAD_TO_DEG;
-  updateFallDetection(mag / 9.80665f, rotationDps, now);
+  float gMag = mag / 9.80665f;
+  updateFallDetection(a, gMag, now);
   static unsigned long lastFallDebugTime = 0;
   if (now - lastFallDebugTime >= FALL_DEBUG_INTERVAL_MS) {
     lastFallDebugTime = now;
-    const char* stateNames[] = {"IDLE", "WAIT_ROTATION", "WAIT_STILL", "COOLDOWN"};
-    Serial.printf("[FALL-DATA] A=%.2fg W=%.1fdeg/s state=%s\n",
-                  lastFallAccelG, lastFallRotationDps, stateNames[fallState]);
+    if (fallState != FALL_STATE_IDLE) {
+      const char* stateNames[] = {"IDLE", "WAIT_IMPACT", "WAIT_IMMOBILITY"};
+      Serial.printf("[FALL-DATA] A=%.2fg state=%s\n", gMag, stateNames[fallState]);
+    }
   }
 #endif
 }

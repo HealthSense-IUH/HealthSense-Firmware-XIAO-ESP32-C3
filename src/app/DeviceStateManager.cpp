@@ -8,6 +8,28 @@
 #include "drivers/PPGManager.h"
 
 // ====================
+// Cấu hình trạng thái khẩn cấp (Emergency / SOS) - Đồng bộ từ XIAO-nRF52840
+// ====================
+static constexpr unsigned long EMERGENCY_CANCEL_WINDOW_MS = 15000UL;
+static constexpr unsigned long EMERGENCY_IMMOBILE_WINDOW_MS = 10000UL;
+static constexpr unsigned long EMERGENCY_FALL_CONFIRM_WINDOW_MS = 2000UL;
+static constexpr unsigned long EMERGENCY_PROBE_INTERVAL_MS = 500UL;
+static constexpr long EMERGENCY_NO_FINGER_IR_THRESHOLD = 50000L;
+static constexpr uint8_t EMERGENCY_BPM_LOW_THRESHOLD = 40;
+static constexpr uint8_t EMERGENCY_BPM_HIGH_THRESHOLD = 150;
+static constexpr uint8_t EMERGENCY_SPO2_THRESHOLD = 90;
+static constexpr unsigned long EMERGENCY_IR_SETTLE_MS = 1500UL;      // Chờ cảm biến ổn định trước khi xét không đeo
+static constexpr uint8_t EMERGENCY_NO_FINGER_CONFIRM_COUNT = 3;      // 3 lần thăm dò IR thấp liên tiếp (~1.5s)
+static constexpr unsigned long EMERGENCY_ALERT_INTERVAL_MS = 2000UL; // Tần suất tối đa của SOS:ALERT
+
+enum EmergencyType {
+  EMERGENCY_NONE,
+  EMERGENCY_FALL,
+  EMERGENCY_SYNCOPE,
+  EMERGENCY_CARDIAC
+};
+
+// ====================
 // Trạng thái chế độ, nút bấm và thời gian hồi phục
 // ====================
 static DeviceMode currentMode = MODE_IDLE;
@@ -28,14 +50,43 @@ static unsigned long lastWearCheck = 0;
 // Hồi phục tim sau tập: trong 10 phút sau WORKOUT_STOP không tự đo / nhận lệnh sàng lọc AFib
 static unsigned long lastWorkoutEndTime = 0;
 
+// Trạng thái khẩn cấp (Emergency)
+static bool emergencyActive = false;
+static bool emergencyCountdownActive = false;
+static EmergencyType emergencyType = EMERGENCY_NONE;
+static unsigned long emergencyStartedAt = 0;
+static unsigned long emergencyAlarmStartedAt = 0;
+static unsigned long emergencyLastProbeAt = 0;
+static uint8_t emergencyCancelSecondsLeft = 0;
+static uint8_t emergencyBpm = 0;
+static uint8_t emergencySpo2 = 0;
+static long emergencyIr = 0;
+static bool emergencySimulated = false;           // true khi kích hoạt bằng CMD:TEST_SOS
+static uint8_t emergencyNoFingerCount = 0;
+static unsigned long emergencyLastAlertAt = 0;
+
 static void enterMode(DeviceMode mode);
 static void exitMode(DeviceMode mode);
 static void requestMode(DeviceMode newMode);
+static void DeviceStateManager_enterEmergency(EmergencyType type);
+static void DeviceStateManager_processEmergency();
+static void DeviceStateManager_abortEmergency(const char* reason);
+static void DeviceStateManager_emitEmergencyStatus(const char* payload);
+
+static const char* DeviceStateManager_emergencyTypeName(EmergencyType type) {
+  return type == EMERGENCY_FALL ? "FALL" :
+         type == EMERGENCY_SYNCOPE ? "SYNCOPE" : "CARDIAC";
+}
+
+static void DeviceStateManager_emitEmergencyStatus(const char* payload) {
+  Serial.printf("[EMERGENCY] TX connected=%d: %s", BLEManager_isConnected() ? 1 : 0, payload);
+  BLEManager_sendEvent(payload);
+  BLEManager_notifyReport(payload, strlen(payload));
+}
 
 // ====================
 // Lệnh từ điện thoại
 // ====================
-
 static void onBLECommand(const char* cmd) {
   if (strcmp(cmd, CMD_START_MEASURE) == 0) {
     DeviceStateManager_onEvent(EVT_BLE_START_MEASURE);
@@ -57,10 +108,18 @@ static void onBLECommand(const char* cmd) {
     DeviceStateManager_onEvent(EVT_BLE_START_SCREENING);
   } else if (strcmp(cmd, CMD_IDLE) == 0) {
     DeviceStateManager_onEvent(EVT_NOT_WEARING);  // Về IDLE
+  } else if (strcmp(cmd, CMD_CANCEL_SOS) == 0) {
+    DeviceStateManager_onEvent(EVT_BLE_CANCEL_SOS);
+  } else if (strcmp(cmd, CMD_TEST_SOS) == 0) {
+    DeviceStateManager_onEvent(EVT_BLE_TEST_SOS);
   } else {
     Serial.print("[BLE-RX] Lệnh không xác định: ");
     Serial.println(cmd);
   }
+}
+
+void DeviceStateManager_handleBLECommand(const char* cmd) {
+  onBLECommand(cmd);
 }
 
 // ====================
@@ -98,6 +157,19 @@ void DeviceStateManager_begin(uint8_t buttonPin, uint8_t accelVdd) {
   pendingMode = MODE_TURN_ON;
   wakeButtonPin = buttonPin;
   accelVddPin = accelVdd;
+  emergencyActive = false;
+  emergencyCountdownActive = false;
+  emergencyType = EMERGENCY_NONE;
+  emergencyStartedAt = 0;
+  emergencyAlarmStartedAt = 0;
+  emergencyLastProbeAt = 0;
+  emergencyCancelSecondsLeft = 0;
+  emergencyBpm = 0;
+  emergencySpo2 = 0;
+  emergencyIr = 0;
+  emergencySimulated = false;
+  emergencyNoFingerCount = 0;
+  emergencyLastAlertAt = 0;
   BLEManager_setCommandCallback(onBLECommand);
   enterMode(MODE_TURN_ON);
 }
@@ -135,6 +207,11 @@ static void flashLED() {
 void DeviceStateManager_onEvent(DeviceEvent event) {
   switch (event) {
     case EVT_BUTTON_SHORT:
+      if (currentMode == MODE_EMERGENCY && emergencyActive) {
+        Serial.println("event BUTTON_SHORT -> hủy SOS tại thiết bị");
+        DeviceStateManager_abortEmergency("BUTTON");
+        break;
+      }
       flashLED();
       Serial.println("event BUTTON_SHORT, LED on");
       break;
@@ -158,8 +235,37 @@ void DeviceStateManager_onEvent(DeviceEvent event) {
 
     case EVT_NOT_WEARING:
       Serial.println("event NOT_WEARING");
+      if (currentMode == MODE_EMERGENCY && emergencyActive) {
+        if (!emergencySimulated) {
+          Serial.println("[EMERGENCY] Phát hiện không đeo tay -> hủy SOS");
+          DeviceStateManager_abortEmergency("NO_WEAR");
+        }
+        break;
+      }
       BLEManager_sendEvent(EVT_MSG_NOT_WEARING);
       requestMode(MODE_IDLE);
+      break;
+
+    case EVT_FALL_DETECTED:
+      if (currentMode == MODE_EMERGENCY || pendingMode == MODE_EMERGENCY) {
+        Serial.println("event FALL_DETECTED (bỏ qua - đang trong EMERGENCY)");
+        break;
+      }
+      Serial.println("event FALL_DETECTED");
+      DeviceStateManager_enterEmergency(EMERGENCY_FALL);
+      break;
+
+    case EVT_BLE_CANCEL_SOS:
+      Serial.println("event BLE_CANCEL_SOS");
+      if (currentMode == MODE_EMERGENCY && emergencyActive) {
+        DeviceStateManager_abortEmergency(nullptr);
+      }
+      break;
+
+    case EVT_BLE_TEST_SOS:
+      Serial.println("event BLE_TEST_SOS");
+      emergencySimulated = true;
+      DeviceStateManager_enterEmergency(EMERGENCY_FALL);
       break;
 
     case EVT_BLE_START_MEASURE:
@@ -208,6 +314,7 @@ void DeviceStateManager_loop() {
 
   if (currentMode == MODE_IDLE) idleLoop();
   else if (currentMode == MODE_SCREENING) AfibScreening_loop();
+  else if (currentMode == MODE_EMERGENCY) DeviceStateManager_processEmergency();
 }
 
 DeviceMode DeviceStateManager_getMode() {
@@ -251,6 +358,32 @@ static void enterMode(DeviceMode mode) {
       AccelManager_setMotionThreshold(MOTION_THRESHOLD_SCREENING);
       break;
 
+    case MODE_EMERGENCY:
+      Serial.println("Mode EMERGENCY");
+      emergencyActive = true;
+      emergencyCountdownActive = true;
+      emergencyType = emergencyType == EMERGENCY_NONE ? EMERGENCY_FALL : emergencyType;
+      emergencyAlarmStartedAt = millis();
+      emergencyStartedAt = millis();
+      emergencyLastProbeAt = millis();
+      emergencyLastAlertAt = 0;
+      emergencyNoFingerCount = 0;
+      emergencyCancelSecondsLeft = 15;
+      emergencyBpm = 0;
+      emergencySpo2 = 0;
+      emergencyIr = 0;
+
+      PPGManager_wakeUp();
+      PPGManager_setupPhase1();
+      DisplayPower_showRed();
+      isLEDOn = true;
+      ledWakeTime = millis();
+      Serial.printf("[EMERGENCY] Enter type=%s simulated=%d connected=%d\n",
+                    DeviceStateManager_emergencyTypeName(emergencyType), emergencySimulated ? 1 : 0,
+                    BLEManager_isConnected() ? 1 : 0);
+      DeviceStateManager_emitEmergencyStatus("SOS:COUNTDOWN,15\n");
+      break;
+
     case MODE_SHUTDOWN:
       Serial.println("Mode SHUTDOWN");
       PPGManager_shutDown();
@@ -286,7 +419,122 @@ static void exitMode(DeviceMode mode) {
       Serial.println("[BLE] Đã bật advertising (thoát IDLE)");
       break;
 
+    case MODE_EMERGENCY:
+      DisplayPower_showOff();
+      emergencyActive = false;
+      emergencyCountdownActive = false;
+      emergencySimulated = false;
+      emergencyNoFingerCount = 0;
+      emergencyType = EMERGENCY_NONE;
+      break;
+
     default:
       break;
+  }
+}
+
+static void DeviceStateManager_enterEmergency(EmergencyType type) {
+  emergencyType = type;
+  Serial.println("[EMERGENCY] Enter request from fall/syncope trigger");
+  if (currentMode != MODE_EMERGENCY) {
+    requestMode(MODE_EMERGENCY);
+  }
+}
+
+static void DeviceStateManager_abortEmergency(const char* reason) {
+  char payload[48];
+  if (reason != nullptr && reason[0] != '\0') {
+    snprintf(payload, sizeof(payload), "SOS:CANCELLED,%s\n", reason);
+  } else {
+    snprintf(payload, sizeof(payload), "SOS:CANCELLED\n");
+  }
+  DeviceStateManager_emitEmergencyStatus(payload);
+  DisplayPower_showOff();
+  PPGManager_shutDown();
+  emergencyActive = false;
+  emergencyCountdownActive = false;
+  emergencySimulated = false;
+  emergencyNoFingerCount = 0;
+  emergencyType = EMERGENCY_NONE;
+  requestMode(MODE_IDLE);
+}
+
+static void DeviceStateManager_processEmergency() {
+  if (!emergencyActive) return;
+
+  unsigned long now = millis();
+
+  // 1. Quản lý đếm ngược (15s hủy)
+  if (emergencyCountdownActive) {
+    if (now - emergencyAlarmStartedAt >= EMERGENCY_CANCEL_WINDOW_MS) {
+      emergencyCountdownActive = false;
+      char confirmed[40];
+      snprintf(confirmed, sizeof(confirmed), "SOS:CONFIRMED,%s\n", DeviceStateManager_emergencyTypeName(emergencyType));
+      DeviceStateManager_emitEmergencyStatus(confirmed);
+    } else {
+      uint8_t secondsLeft = (uint8_t)((EMERGENCY_CANCEL_WINDOW_MS - (now - emergencyAlarmStartedAt) + 999UL) / 1000UL);
+      if (secondsLeft != emergencyCancelSecondsLeft) {
+        emergencyCancelSecondsLeft = secondsLeft;
+        char countdown[32];
+        snprintf(countdown, sizeof(countdown), "SOS:COUNTDOWN,%u\n", emergencyCancelSecondsLeft);
+        DeviceStateManager_emitEmergencyStatus(countdown);
+        // Nháy LED đỏ báo động
+        if (secondsLeft % 2 == 0) DisplayPower_showRed();
+        else DisplayPower_showOff();
+      }
+    }
+  }
+
+  // 2. Thăm dò nhịp tim & kiểm tra đeo tay
+  if (now - emergencyLastProbeAt >= EMERGENCY_PROBE_INTERVAL_MS) {
+    emergencyLastProbeAt = now;
+    emergencyIr = PPGManager_readIR();
+    emergencyBpm = PPGManager_getBPM();
+    emergencySpo2 = PPGManager_getSpO2();
+    Serial.printf("[EMERGENCY] probe t=%lums IR=%ld BPM=%u SpO2=%u lowIR=%u\n",
+                  (unsigned long)(now - emergencyStartedAt), emergencyIr, emergencyBpm, emergencySpo2,
+                  emergencyNoFingerCount);
+
+    if (!emergencySimulated && (now - emergencyStartedAt) >= EMERGENCY_IR_SETTLE_MS) {
+      if (emergencyIr < EMERGENCY_NO_FINGER_IR_THRESHOLD) {
+        emergencyNoFingerCount++;
+        if (emergencyNoFingerCount >= EMERGENCY_NO_FINGER_CONFIRM_COUNT) {
+          Serial.println("[EMERGENCY] IR thấp liên tiếp -> không đeo tay, hủy SOS");
+          DeviceStateManager_abortEmergency("NO_WEAR");
+          return;
+        }
+      } else {
+        emergencyNoFingerCount = 0;
+      }
+    }
+
+    bool abnormalVitals =
+        (emergencyBpm > 0 && emergencyBpm < EMERGENCY_BPM_LOW_THRESHOLD) ||
+        (emergencyBpm > EMERGENCY_BPM_HIGH_THRESHOLD) ||
+        (emergencySpo2 > 0 && emergencySpo2 < EMERGENCY_SPO2_THRESHOLD);
+
+    bool immobile = !AccelManager_isMoving() && (now - emergencyStartedAt >= EMERGENCY_IMMOBILE_WINDOW_MS);
+    if ((abnormalVitals || immobile) && (now - emergencyLastAlertAt >= EMERGENCY_ALERT_INTERVAL_MS)) {
+      emergencyLastAlertAt = now;
+      if (abnormalVitals) {
+        char payload[96];
+        snprintf(payload, sizeof(payload), "SOS:ALERT,%s,ACTIVE,%lu,%u,%u,%ld\n",
+                 DeviceStateManager_emergencyTypeName(emergencyType), (unsigned long)now,
+                 emergencyBpm, emergencySpo2, emergencyIr);
+        DeviceStateManager_emitEmergencyStatus(payload);
+      } else {
+        DeviceStateManager_emitEmergencyStatus("SOS:ALERT,SYNCOPE,ACTIVE\n");
+      }
+    }
+
+    if (emergencyType == EMERGENCY_FALL && (now - emergencyStartedAt >= EMERGENCY_FALL_CONFIRM_WINDOW_MS)) {
+      if (!abnormalVitals && AccelManager_isMoving()) {
+        emergencyType = EMERGENCY_SYNCOPE;
+      }
+    }
+
+    if (emergencyType == EMERGENCY_FALL && emergencyCountdownActive && (now - emergencyStartedAt >= EMERGENCY_CANCEL_WINDOW_MS)) {
+      emergencyType = EMERGENCY_CARDIAC;
+    }
   }
 }
