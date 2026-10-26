@@ -64,25 +64,14 @@ BLE (chi tiết trong `BleProtocol.h`): một service với 3 characteristic DAT
 3. Kết nối board XIAO ESP32C3 với máy tính.
 4. Nhấn nút **Build** và **Upload** trên thanh công cụ của PlatformIO.
 
-### Thử phát hiện té ngã qua Serial
-`HS_FALL_TEST_ENABLED=1` trong `src/config/config.h` bật gyroscope và lấy mẫu MPU6050
-100Hz; bộ đếm bước vẫn cập nhật 25Hz. Nạp firmware mới rồi mở Serial Monitor ở
-115200 baud trên cổng USB của board (hiện tại COM5, có thể đổi khi cắm lại).
-Không cần kết nối ứng dụng điện thoại.
-
-Log `[FALL-DATA]` mỗi 500ms hiển thị độ lớn gia tốc (g), tốc độ xoay (độ/giây)
-và trạng thái. Thuật toán thử nghiệm tìm gia tốc vượt 2g, xoay ít nhất 150 độ/giây
-trong khoảng 500ms trước hoặc 1000ms sau va chạm, rồi ít chuyển động liên tục
-3 giây trong thời hạn 8 giây kể từ va chạm. Khi đó in `[FALL] SUSPECTED` và chờ
-10 giây trước lần phát hiện tiếp theo. Chỉ ghi Serial, chưa gửi cảnh báo qua BLE.
-
-Để xem tín hiệu, chuyển động/xoay thiết bị khi đang ngồi rồi giữ yên trên đệm;
-không cần tự ngã hoặc đập thiết bị. Một chuyển động nhẹ có thể không vượt ngưỡng.
-Đây là bản thử ngưỡng trên cổ tay, có thể báo nhầm hoặc bỏ sót; các ngưỡng nằm
-trong nhóm `FALL_*` của `config.h` để điều chỉnh theo log.
-Khi bật bản thử, CSV PPG trên Serial mặc định tắt để dễ đọc log. Đặt
-`HS_FALL_TEST_ENABLED=0` rồi nạp lại để tắt gyroscope và trở về chế độ log trước đó;
-có thể đặt riêng `HS_LOG_PPG_CSV=1` nếu cần ghi CSV trong lúc thử.
+### Phát hiện té ngã 3 giai đoạn (3-Stage Fall Verification)
+Đồng bộ logic thuật toán chuẩn từ phiên bản XIAO-nRF52840:
+- **Giai đoạn 1 (Rơi tự do - Free-fall):** Lấy mẫu gia tốc 100Hz (`FALL_SAMPLE_MS = 10ms`), phát hiện gia tốc tổng $gMag < 0.35g$ liên tục ít nhất 2 mẫu (~20ms).
+- **Giai đoạn 2 (Va chạm mặt sàn - Impact Detection):** Trong vòng 600ms (`FALL_IMPACT_TIMEOUT_MS`), chờ xung va đập có độ lớn $gMag \ge 1.8g$. Nếu quá 600ms không có va chạm -> tự động hủy.
+- **Giai đoạn 3 (Xác minh bất động - Immobility Filter):** Chờ trong 1.5 giây sau va chạm:
+  - 250ms đầu tiên (`FALL_SETTLE_MS`): Bỏ qua rung chấn cơ học nảy đập sau cú ngã, cập nhật baseline.
+  - Từ 250ms đến 1500ms: Cứ mỗi 50ms kiểm tra cử động. Nếu $\Delta > 1.2 m/s^2$ (~0.12g), người dùng đang chạy bộ/vung tay hoặc tự đứng dậy -> Hủy báo động ngay.
+  - Nếu bất động liên tục đủ 1.5 giây: Xác nhận té ngã thật sự (`fallEventFlag = true`). Con quay (Gyroscope) được cho ngủ (`setGyroStandby`) để tiết kiệm tối đa pin.
 
 ---
 

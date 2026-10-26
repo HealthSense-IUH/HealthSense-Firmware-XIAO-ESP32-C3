@@ -23,6 +23,8 @@
 #define CMD_WORKOUT_STOP     "CMD:WORKOUT_STOP"
 #define CMD_START_SCREENING  "CMD:START_SCREENING"
 #define CMD_IDLE             "CMD:IDLE"
+#define CMD_CANCEL_SOS       "CMD:CANCEL_SOS"
+#define CMD_TEST_SOS         "CMD:TEST_SOS"
 
 // ====================
 // Sự kiện thiết bị -> điện thoại (characteristic DATA)

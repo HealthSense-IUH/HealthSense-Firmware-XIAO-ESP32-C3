@@ -16,4 +16,10 @@ void AccelManager_setMotionThreshold(uint8_t threshold);
 // Số bước đếm được từ lúc bật máy (peak detection)
 uint32_t AccelManager_getStepCount();
 
+// Phát hiện té ngã 3 giai đoạn: Rơi tự do -> Va chạm -> Bất động 1.5s (giống XIAO-nRF52840)
+bool AccelManager_popFallEvent();
+void AccelManager_startFallDetection();
+void AccelManager_stopFallDetection();
+bool AccelManager_isFallDetectionEnabled();
+
 #endif

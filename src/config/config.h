@@ -41,23 +41,23 @@
 #define MOTION_THRESHOLD_SCREENING  8
 
 // ====================
-// Phát hiện té ngã thử nghiệm: chỉ log Serial
+// Phát hiện té ngã 3 giai đoạn (Free-fall -> Impact -> Immobility)
+// Tương đương thuật toán trên XIAO-nRF52840
 // ====================
 #ifndef HS_FALL_TEST_ENABLED
 #define HS_FALL_TEST_ENABLED 1
 #endif
-#define FALL_SAMPLE_MS          10UL     // 100Hz để theo dõi va chạm ngắn
-#define FALL_IMPACT_G           2.0f     // Ngưỡng thử nghiệm, cần kiểm thử trên cổ tay
-#define FALL_ROTATION_DPS       150.0f
-#define FALL_ROTATION_BEFORE_MS 500UL    // Cho phép xoay xảy ra trước va chạm
-#define FALL_ROTATION_AFTER_MS  1000UL   // Chờ xoay sau va chạm
-#define FALL_STILL_G_TOLERANCE  0.20f    // Gia tốc gần 1g khi đứng yên
-#define FALL_STILL_DPS          25.0f
-#define FALL_STILL_MS           3000UL   // Phải ít chuyển động liên tục 3 giây
-#define FALL_CONFIRM_TIMEOUT_MS 8000UL
-#define FALL_MAX_SAMPLE_GAP_MS  100UL    // Không tính khoảng thiếu mẫu là đứng yên
-#define FALL_COOLDOWN_MS        10000UL
-#define FALL_DEBUG_INTERVAL_MS  500UL
+#define FALL_SAMPLE_MS              10UL     // 100Hz lấy mẫu gia tốc
+#define FALL_FREE_FALL_G            0.35f    // Ngưỡng rơi tự do (< 0.35g)
+#define FALL_FREE_FALL_MIN_SAMPLES  2        // Ít nhất 2 mẫu liên tiếp (~20ms) dưới ngưỡng
+#define FALL_IMPACT_G               1.80f    // Ngưỡng va chạm (>= 1.8g)
+#define FALL_IMPACT_TIMEOUT_MS      600UL    // Cửa sổ chờ va chạm sau cú rơi (600ms)
+#define FALL_SETTLE_MS              500UL    // Thời gian rung chấn cơ học sau va chạm (500ms)
+#define FALL_IMMOBILITY_WINDOW_MS   1500UL   // Cửa sổ kiểm tra bất động sau rung chấn (1500ms)
+#define FALL_SAMPLE_INTERVAL_MS     50UL     // Chu kỳ kiểm tra cử động khi chờ bất động (50ms)
+#define FALL_MOTION_DELTA_THRESH    1.50f    // Ngưỡng phát hiện cử động sau va chạm (~0.15g hay 1.5 m/s²)
+#define FALL_MOTION_STREAK_THRESH   4        // Cần cử động liên tục >= 4 mẫu (~200ms) mới hủy báo động
+#define FALL_DEBUG_INTERVAL_MS      500UL
 
 // ====================
 // Log Serial
