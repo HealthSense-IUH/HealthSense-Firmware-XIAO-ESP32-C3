@@ -129,29 +129,11 @@ static uint8_t averageSpO2() {
 // Xử lý rung tay, kết thúc pha và thử đo lại
 // ====================
 static void onPhase1Motion() {
-  Serial.println("[SCREENING] Phát hiện chuyển động! Ngừng đo Pha 1 và thử lại chớp nhoáng...");
-
-  // Cứu dữ liệu: đã có hơn 10 mẫu hợp lệ trước khi rung tay thì vẫn báo R1
-  if (validSampleCount > SALVAGE_MIN_SAMPLES && BLEManager_isConnected()) {
-    uint8_t avgBPM = averageBPM();
-    uint8_t avgSpO2 = averageSpO2();
-    sendReport(FMT_REPORT_PHASE1, avgBPM, avgSpO2);
-    Serial.printf("[SCREENING] Đã vớt vát dữ liệu sinh hiệu trước khi hủy: %u BPM, %u%%\n", avgBPM, avgSpO2);
-  }
-
+  Serial.println("[SCREENING] Phát hiện chuyển động tay! Hủy phiên đo Pha 1...");
+  // Không gửi R1 vì tín hiệu PPG đã bị méo mó/nhiễu do chuyển động
   PPGManager_shutDown();
-  screeningRetryCount++;
-
-  if (screeningRetryCount < MAX_PHASE1_ATTEMPTS) {
-    screeningPhase = PHASE1_RETRY_SLEEP;
-    phaseSleepStart = millis();
-    Serial.printf("[SCREENING] Micro-Retry lần %u/%u. Ngủ đông 30 giây...\n", screeningRetryCount,
-                  MAX_PHASE1_ATTEMPTS);
-  } else {
-    isSpo2Missed = true;
-    Serial.println("[SCREENING] Thất bại 3 lần đo Pha 1. Bỏ lỡ SpO2. Nghỉ đến mốc 2.5 phút (Pha 2)...");
-    sleepUntil(WAIT_PHASE2, PHASE2_START_MS);
-  }
+  screeningPhase = PHASE_NONE;
+  screeningRetryCount = 0;
 }
 
 static void finishPhase1() {

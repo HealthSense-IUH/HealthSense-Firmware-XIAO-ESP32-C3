@@ -226,10 +226,11 @@ void DeviceStateManager_onEvent(DeviceEvent event) {
       Serial.printf("[%lu] event MOTION, detected arm motion\n", (unsigned long)millis());
       BLEManager_sendEvent(EVT_MSG_MOTION);
       if (currentMode == MODE_MEASURE) {
-        // Đo chủ động bị rung tay: về IDLE chờ người dùng đo lại
-        requestMode(MODE_IDLE);
+        // Đo tức thời (Spot-check): gửi thông báo rung tay nhưng không ngắt đo về IDLE
+        // để cảm biến tiếp tục đọc khi tay người dùng yên tĩnh trở lại
       } else {
         AfibScreening_onMotion();
+        requestMode(MODE_IDLE);
       }
       break;
 
@@ -343,6 +344,7 @@ static void enterMode(DeviceMode mode) {
     case MODE_MEASURE:
       Serial.println("Mode MEASURE");
       PPGManager_wakeUp();
+      PPGManager_setupPhase1();
       AccelManager_setMotionThreshold(MOTION_THRESHOLD_MEASURE);
       break;
 

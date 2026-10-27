@@ -301,6 +301,12 @@ void AccelManager_process() {
     lastPedometerSampleTime = now;
     updatePedometer(mag, now);
   }
+
+  // Phát hiện cử động cánh tay qua gia tốc động lực (software fallback khi chân INT phần cứng chưa kích hoạt)
+  float dynamicAccel = fabsf(mag - 9.80665f);
+  if (dynamicAccel > 2.2f) { // Chuyển động rung lắc / vung tay > ~0.22g
+    isMoving = true;
+  }
 #if HS_FALL_TEST_ENABLED
   float gMag = mag / 9.80665f;
   updateFallDetection(a, gMag, now);
