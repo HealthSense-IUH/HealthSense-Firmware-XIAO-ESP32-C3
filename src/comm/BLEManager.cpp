@@ -120,7 +120,7 @@ class ServerCallbacks : public BLEServerCallbacks {
 // Điện thoại ghi lệnh vào characteristic WRITE
 class WriteCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pChar) {
-    std::string raw = pChar->getValue();
+    std::string raw = pChar->getValue().c_str();
     if (raw.empty() || commandCallback == nullptr) return;
 
     // Bỏ '\n', '\r', khoảng trắng cuối
