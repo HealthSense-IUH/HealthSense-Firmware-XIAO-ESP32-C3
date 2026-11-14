@@ -6,11 +6,11 @@
 
 /*
  * Sàng lọc AFib: chu kỳ 10 phút, mốc tính từ đầu chu kỳ.
- *   Pha 1 (0s):     đo 60s đầy đủ (BPM + SpO2) -> báo R1
+ *   Pha 1 (0s):     đo 72s đầy đủ (BPM + SpO2) -> báo R1
  *   Pha 2 (150s), Pha 3 (300s), Pha 4 (450s): đo 30s (chủ yếu BPM, LED đỏ gần tắt) -> báo R2
  *   600s:           bắt đầu chu kỳ mới
  * Giữa các pha cảm biến tắt để tiết kiệm pin. Rung tay trong pha 1 thì ngủ 30s rồi đo lại (tối đa 3 lần);
- * hỏng cả 3 lần hoặc không còn đủ 60s trước mốc 150s thì bỏ SpO2 của chu kỳ, các pha sau đo cả SpO2.
+ * hỏng cả 3 lần hoặc không còn đủ 72s trước mốc 150s thì bỏ SpO2 của chu kỳ, các pha sau đo cả SpO2.
  * Giá trị enum giữ như bản cũ: pha đo phụ là số lẻ, pha chờ trước nó là số chẵn liền trước.
  */
 // ====================
@@ -29,7 +29,7 @@ enum ScreeningPhase : uint8_t {
   PHASE1_RETRY_SLEEP = 9,
 };
 
-#define PHASE1_DURATION_MS      60000UL
+#define PHASE1_DURATION_MS      72000UL
 #define SUB_PHASE_DURATION_MS   30000UL
 #define RETRY_SLEEP_MS          30000UL
 #define MAX_PHASE1_ATTEMPTS     3
@@ -169,11 +169,11 @@ static void finishSubPhase() {
   Serial.printf("[SCREENING] Ngủ động %lu giây để đến mốc %lus...\n", phaseSleepDuration / 1000, targetMs / 1000);
 }
 
-/** Hết 30s ngủ thử lại: còn đủ 60s trước mốc pha 2 thì đo lại pha 1, không thì bỏ SpO2 và chờ pha 2. */
+/** Hết 30s ngủ thử lại: còn đủ 72s trước mốc pha 2 thì đo lại pha 1, không thì bỏ SpO2 và chờ pha 2. */
 static void finishRetrySleep() {
   long untilPhase2 = (long)(screeningCycleStart + PHASE2_START_MS) - (long)millis();
   if (untilPhase2 < (long)PHASE1_DURATION_MS) {
-    Serial.println("[SCREENING] Thời gian còn lại < 60s, không đủ đo trọn vẹn Pha 1. Hủy đo Pha 1 và chuyển sang chờ Pha 2...");
+    Serial.println("[SCREENING] Thời gian còn lại < 72s, không đủ đo trọn vẹn Pha 1. Hủy đo Pha 1 và chuyển sang chờ Pha 2...");
     isSpo2Missed = true;
     sleepUntil(WAIT_PHASE2, PHASE2_START_MS);
   } else {
